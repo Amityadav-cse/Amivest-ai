@@ -1,34 +1,39 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, session
 from database.db import get_connection
 import traceback
 
+
 transaction = Blueprint("transaction", __name__)
 
-# ======================================================
-# GET ALL TRANSACTIONS
-# ======================================================
+
+# =====================================================
+# GET CURRENT USER TRANSACTIONS
+# =====================================================
+
 @transaction.route("/transactions", methods=["GET"])
 def get_transactions():
+
     conn = None
     cursor = None
 
     try:
-        print("✅ /transactions API Called")
 
-        user_id = request.args.get("user_id", 1)
+        # NEVER trust user_id from URL.
+        user_id = session.get("user_id")
 
-        conn = get_connection()
+        if not user_id:
 
-        if conn is None:
             return jsonify({
                 "success": False,
                 "transactions": [],
-                "error": "Unable to connect to MySQL database."
-            }), 500
+                "error": "Authentication required."
+            }), 401
 
+        conn = get_connection()
         cursor = conn.cursor(dictionary=True)
 
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT
                 id,
                 type,
@@ -37,14 +42,13 @@ def get_transactions():
                 description,
                 transaction_date
             FROM transactions
-            WHERE user_id=%s
+            WHERE user_id = %s
             ORDER BY transaction_date DESC, id DESC
-        """, (user_id,))
+            """,
+            (user_id,)
+        )
 
-        rows = cursor.fetchall()
-
-        if rows is None:
-            rows = []
+        rows = cursor.fetchall() or []
 
         return jsonify({
             "success": True,
@@ -52,7 +56,8 @@ def get_transactions():
         }), 200
 
     except Exception as e:
-        print("❌ TRANSACTION ERROR")
+
+        print("TRANSACTION ERROR")
         traceback.print_exc()
 
         return jsonify({
@@ -62,22 +67,24 @@ def get_transactions():
         }), 500
 
     finally:
-        try:
-            if cursor:
+
+        if cursor:
+            try:
                 cursor.close()
-        except:
-            pass
+            except:
+                pass
 
-        try:
-            if conn:
+        if conn:
+            try:
                 conn.close()
-        except:
-            pass
+            except:
+                pass
 
 
-# ======================================================
+# =====================================================
 # ADD TRANSACTION
-# ======================================================
+# =====================================================
+
 @transaction.route("/transactions", methods=["POST"])
 def add_transaction():
 
@@ -85,15 +92,26 @@ def add_transaction():
     cursor = None
 
     try:
+
+        # User comes from authenticated session.
+        user_id = session.get("user_id")
+
+        if not user_id:
+
+            return jsonify({
+                "success": False,
+                "error": "Authentication required."
+            }), 401
+
         data = request.get_json()
 
         if not data:
+
             return jsonify({
                 "success": False,
                 "error": "No JSON data received."
             }), 400
 
-        user_id = data.get("user_id", 1)
         type_ = data.get("type")
         category = data.get("category")
         amount = data.get("amount")
@@ -101,37 +119,46 @@ def add_transaction():
         transaction_date = data.get("transaction_date")
 
         conn = get_connection()
-
-        if conn is None:
-            return jsonify({
-                "success": False,
-                "error": "Database connection failed."
-            }), 500
-
         cursor = conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO transactions
-            (user_id, type, category, amount, description, transaction_date)
-            VALUES (%s,%s,%s,%s,%s,%s)
-        """, (
-            user_id,
-            type_,
-            category,
-            amount,
-            description,
-            transaction_date
-        ))
+            (
+                user_id,
+                type,
+                category,
+                amount,
+                description,
+                transaction_date
+            )
+            VALUES
+            (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user_id,
+                type_,
+                category,
+                amount,
+                description,
+                transaction_date
+            )
+        )
 
         conn.commit()
 
         return jsonify({
             "success": True,
-            "message": "Transaction added successfully."
+            "message": "Transaction added successfully.",
+            "transaction_id": cursor.lastrowid
         }), 201
 
     except Exception as e:
-        print("❌ ADD TRANSACTION ERROR")
+
+        if conn:
+            conn.rollback()
+
+        print("ADD TRANSACTION ERROR")
         traceback.print_exc()
 
         return jsonify({
@@ -140,14 +167,15 @@ def add_transaction():
         }), 500
 
     finally:
-        try:
-            if cursor:
-                cursor.close()
-        except:
-            pass
 
-        try:
-            if conn:
+        if cursor:
+            try:
+                cursor.close()
+            except:
+                pass
+
+        if conn:
+            try:
                 conn.close()
-        except:
-            pass
+            except:
+                pass

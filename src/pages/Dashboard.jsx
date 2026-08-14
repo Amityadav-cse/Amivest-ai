@@ -1,158 +1,671 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-// CHANGED: reads the backend URL from VITE_API_URL (set in your .env
-// files) instead of hardcoding localhost. In dev this falls back to
-// 127.0.0.1:5000 automatically; in production it uses whatever you
-// set VITE_API_URL to on Vercel (your Render backend URL).
-const ENV_API_URL = import.meta.env.VITE_API_URL;
-const BASE_IP = ENV_API_URL || "http://127.0.0.1:5000";
-const BASE_LOCAL = ENV_API_URL || "http://localhost:5000";
-
-async function apiCall(path, options = {}) {
-  const urls = ENV_API_URL
-    ? [`${ENV_API_URL}${path}`]
-    : [path, `${BASE_IP}${path}`, `${BASE_LOCAL}${path}`];
-  const attempts = [];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, options);
-      let body = null, parseFailed = false;
-      try { body = await res.json(); } catch (_) { parseFailed = true; }
-      if (res.ok && !parseFailed) return body;
-      if (res.ok && parseFailed) { attempts.push(`${url} → HTTP ${res.status} but not JSON`); continue; }
-      attempts.push(`${url} → HTTP ${res.status}: ${(body && (body.error || body.message)) || "no details"}`);
-    } catch (err) {
-      attempts.push(`${url} → ${err.name}: ${err.message}`);
-    }
-  }
-  throw new Error(attempts.join("  |  "));
-}
+const API_URL =
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:5000";
 
 function Dashboard({ transactions, setTransactions }) {
-  const [loading, setLoading] = useState(transactions.length === 0);
-  const [loadError, setLoadError] = useState("");
   const navigate = useNavigate();
 
-  // FIXED: previously depended on [transactions, setTransactions], which
-  // re-triggered this effect every time setTransactions ran inside it —
-  // causing rapid re-renders/flicker. Now it only runs once on mount.
-  useEffect(() => {
-    if (transactions.length > 0) {
-      setLoading(false);
-      return;
-    }
+  const [currentUser, setCurrentUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-    const loadHistoricData = async () => {
-      setLoadError("");
+  useEffect(() => {
+    let mounted = true;
+
+    const loadDashboard = async () => {
       try {
-        const data = await apiCall("/transactions", { method: "GET" });
-        if (Array.isArray(data)) {
-          setTransactions(data);
-        } else if (data.transactions && Array.isArray(data.transactions)) {
-          setTransactions(data.transactions);
+        setLoading(true);
+        setError("");
+
+        // ==========================================
+        // 1. CHECK FLASK SESSION
+        // ==========================================
+
+        const sessionResponse = await fetch(
+          `${API_URL}/session`,
+          {
+            method: "GET",
+            credentials: "include",
+          }
+        );
+
+        const sessionData = await sessionResponse.json();
+
+        console.log("SESSION:", sessionData);
+
+        if (!sessionResponse.ok || !sessionData.authenticated) {
+          if (mounted) {
+            setCurrentUser(null);
+            setTransactions([]);
+          }
+
+          return;
+        }
+
+        const user = sessionData.user;
+
+        if (mounted) {
+          setCurrentUser(user);
+
+          // Only for UI information.
+          localStorage.setItem(
+            "user",
+            JSON.stringify(user)
+          );
+        }
+
+        // ==========================================
+        // 2. GET TRANSACTIONS
+        //
+        // IMPORTANT:
+        // NO user_id here.
+        // ==========================================
+
+        const transactionResponse = await fetch(
+          `${API_URL}/transactions`,
+          {
+            method: "GET",
+            credentials: "include",
+          }
+        );
+
+        const transactionData =
+          await transactionResponse.json();
+
+        console.log(
+          "TRANSACTIONS:",
+          transactionData
+        );
+
+        if (!transactionResponse.ok) {
+          throw new Error(
+            transactionData.error ||
+              transactionData.message ||
+              `Server returned ${transactionResponse.status}`
+          );
+        }
+
+        if (mounted) {
+          setTransactions(
+            Array.isArray(transactionData.transactions)
+              ? transactionData.transactions
+              : []
+          );
         }
       } catch (err) {
-        console.error("Dashboard fetching connection exception:", err.message);
-        setLoadError(err.message);
+        console.error("DASHBOARD ERROR:", err);
+
+        if (mounted) {
+          setError(err.message);
+          setTransactions([]);
+        }
       } finally {
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       }
     };
 
-    loadHistoricData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    loadDashboard();
 
-  const totalIncome = transactions
-    .filter(t => t.amount > 0 || String(t.type).toLowerCase() === "credit")
-    .reduce((sum, t) => sum + Math.abs(Number(t.amount || 0)), 0);
+    return () => {
+      mounted = false;
+    };
+  }, [setTransactions]);
 
-  const totalExpenses = transactions
-    .filter(t => t.amount < 0 || String(t.type).toLowerCase() === "debit")
-    .reduce((sum, t) => sum + Math.abs(Number(t.amount || 0)), 0);
-
-  const netSavings = totalIncome - totalExpenses;
+  // ==========================================
+  // LOADING
+  // ==========================================
 
   if (loading) {
     return (
-      <div style={{ display: "flex", minHeight: "70vh", alignItems: "center", justifyContent: "center", color: "#9ca3af" }}>
-        <h3>Loading your Amivest AI Dashboard...</h3>
+      <div
+        style={{
+          minHeight: "70vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#9ca3af",
+          fontSize: "18px",
+        }}
+      >
+        Loading your financial dashboard...
       </div>
     );
   }
 
-  return (
-    <div style={{ color: "#ffffff" }}>
-      <div style={{ marginBottom: "35px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: "28px", fontWeight: "700" }}>Dashboard</h1>
-          <p style={{ margin: "4px 0 0 0", color: "#9ca3af", fontSize: "14px" }}>Telemetry results from your bank statements file mapping.</p>
+  // ==========================================
+  // NOT LOGGED IN
+  // ==========================================
+
+  if (!currentUser) {
+    return (
+      <div
+        style={{
+          minHeight: "60vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <div
+          style={{
+            width: "100%",
+            maxWidth: "600px",
+            background: "#161a1f",
+            border: "1px solid #242b35",
+            borderRadius: "16px",
+            padding: "50px",
+            textAlign: "center",
+            color: "#fff",
+          }}
+        >
+          <div style={{ fontSize: "50px" }}>🔒</div>
+
+          <h2>Authentication Required</h2>
+
+          <p style={{ color: "#9ca3af" }}>
+            Please login to view your private financial dashboard.
+          </p>
+
+          <button
+            onClick={() => navigate("/login")}
+            style={{
+              background: "#ff4500",
+              color: "#fff",
+              border: "none",
+              padding: "12px 25px",
+              borderRadius: "8px",
+              fontWeight: "700",
+              cursor: "pointer",
+            }}
+          >
+            Go to Login
+          </button>
         </div>
-        <button onClick={() => navigate("/import")} style={{ background: "#ff4500", color: "#fff", border: "none", padding: "12px 20px", borderRadius: "8px", fontWeight: "600", cursor: "pointer" }}>
+      </div>
+    );
+  }
+
+  // ==========================================
+  // CALCULATE INCOME
+  // ==========================================
+
+  const totalIncome = transactions
+    .filter((transaction) => {
+      const amount = Number(transaction.amount || 0);
+
+      const type = String(
+        transaction.type || ""
+      ).toLowerCase();
+
+      return (
+        amount > 0 ||
+        type === "credit" ||
+        type === "cr" ||
+        type === "income"
+      );
+    })
+    .reduce((sum, transaction) => {
+      return (
+        sum +
+        Math.abs(
+          Number(transaction.amount || 0)
+        )
+      );
+    }, 0);
+
+  // ==========================================
+  // CALCULATE EXPENSES
+  // ==========================================
+
+  const totalExpenses = transactions
+    .filter((transaction) => {
+      const amount = Number(transaction.amount || 0);
+
+      const type = String(
+        transaction.type || ""
+      ).toLowerCase();
+
+      return (
+        amount < 0 ||
+        type === "debit" ||
+        type === "dr" ||
+        type === "expense"
+      );
+    })
+    .reduce((sum, transaction) => {
+      return (
+        sum +
+        Math.abs(
+          Number(transaction.amount || 0)
+        )
+      );
+    }, 0);
+
+  const netSavings =
+    totalIncome - totalExpenses;
+
+  // ==========================================
+  // FORMAT MONEY
+  // ==========================================
+
+  const money = (value) =>
+    Number(value || 0).toLocaleString("en-IN", {
+      maximumFractionDigits: 2,
+    });
+
+  // ==========================================
+  // DASHBOARD
+  // ==========================================
+
+  return (
+    <div
+      style={{
+        color: "#fff",
+        width: "100%",
+      }}
+    >
+      {/* ======================================
+          HEADER
+      ====================================== */}
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "20px",
+          marginBottom: "30px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <h1
+            style={{
+              margin: 0,
+              fontSize: "32px",
+            }}
+          >
+            Dashboard for {currentUser.name}
+          </h1>
+
+          <p
+            style={{
+              color: "#9ca3af",
+              marginTop: "8px",
+            }}
+          >
+            Account ID: #{currentUser.id}
+          </p>
+        </div>
+
+        <button
+          onClick={() => navigate("/import")}
+          style={{
+            background: "#ff4500",
+            color: "#fff",
+            border: "none",
+            padding: "13px 20px",
+            borderRadius: "9px",
+            fontWeight: "700",
+            cursor: "pointer",
+          }}
+        >
           📥 Import Statement
         </button>
       </div>
 
-      {loadError && (
-        <div style={{ background: "#161a1f", border: "1px solid #EF4444", borderRadius: "12px", padding: "16px 18px", marginBottom: "24px" }}>
-          <div style={{ color: "#FCA5A5", fontWeight: "700", fontSize: "13px", marginBottom: "6px" }}>⚠️ Couldn't load your saved transactions from the database</div>
-          <div style={{ color: "#FCA5A5", fontSize: "12px", fontFamily: "monospace", opacity: 0.85 }}>{loadError}</div>
+      {/* ======================================
+          ERROR
+      ====================================== */}
+
+      {error && (
+        <div
+          style={{
+            background: "#2a1515",
+            border: "1px solid #ef4444",
+            color: "#fca5a5",
+            padding: "15px",
+            borderRadius: "10px",
+            marginBottom: "25px",
+          }}
+        >
+          ⚠️ {error}
         </div>
       )}
 
+      {/* ======================================
+          NO TRANSACTIONS
+      ====================================== */}
+
       {transactions.length === 0 ? (
-        <div style={{ background: "#161a1f", padding: "50px", borderRadius: "16px", textAlign: "center", border: "1px solid #242b35" }}>
-          <h3>No Statements Imported Yet</h3>
-          <p style={{ color: "#9ca3af" }}>Please go to the importer page to process statement files.</p>
+        <div
+          style={{
+            background: "#161a1f",
+            border: "1px solid #242b35",
+            borderRadius: "16px",
+            padding: "70px 30px",
+            textAlign: "center",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "55px",
+              marginBottom: "15px",
+            }}
+          >
+            📊
+          </div>
+
+          <h2>No Transactions Found</h2>
+
+          <p
+            style={{
+              color: "#9ca3af",
+            }}
+          >
+            Your account currently has no imported
+            transactions.
+          </p>
+
+          <button
+            onClick={() => navigate("/import")}
+            style={{
+              marginTop: "15px",
+              background: "#ff4500",
+              color: "#fff",
+              border: "none",
+              padding: "12px 24px",
+              borderRadius: "8px",
+              fontWeight: "700",
+              cursor: "pointer",
+            }}
+          >
+            Import Statement
+          </button>
         </div>
       ) : (
-        <div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "20px", marginBottom: "40px" }}>
-            <div style={{ background: "#161a1f", padding: "24px", borderRadius: "16px", border: "1px solid #242b35" }}>
-              <div style={{ color: "#9ca3af", fontSize: "13px", marginBottom: "6px" }}>TOTAL DEPOSITS</div>
-              <div style={{ fontSize: "28px", fontWeight: "700", color: "#10b981" }}>₹{totalIncome.toLocaleString()}</div>
+        <>
+          {/* ====================================
+              SUMMARY CARDS
+          ==================================== */}
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: "20px",
+              marginBottom: "30px",
+            }}
+          >
+            {/* INCOME */}
+
+            <div
+              style={{
+                background: "#161a1f",
+                border: "1px solid #242b35",
+                borderRadius: "16px",
+                padding: "25px",
+              }}
+            >
+              <div
+                style={{
+                  color: "#9ca3af",
+                  fontSize: "13px",
+                }}
+              >
+                TOTAL DEPOSITS
+              </div>
+
+              <div
+                style={{
+                  color: "#10b981",
+                  fontSize: "30px",
+                  fontWeight: "700",
+                  marginTop: "8px",
+                }}
+              >
+                ₹{money(totalIncome)}
+              </div>
             </div>
-            <div style={{ background: "#161a1f", padding: "24px", borderRadius: "16px", border: "1px solid #242b35" }}>
-              <div style={{ color: "#9ca3af", fontSize: "13px", marginBottom: "6px" }}>TOTAL OUTFLOWS</div>
-              <div style={{ fontSize: "28px", fontWeight: "700", color: "#ef4444" }}>₹{totalExpenses.toLocaleString()}</div>
+
+            {/* EXPENSE */}
+
+            <div
+              style={{
+                background: "#161a1f",
+                border: "1px solid #242b35",
+                borderRadius: "16px",
+                padding: "25px",
+              }}
+            >
+              <div
+                style={{
+                  color: "#9ca3af",
+                  fontSize: "13px",
+                }}
+              >
+                TOTAL OUTFLOWS
+              </div>
+
+              <div
+                style={{
+                  color: "#ef4444",
+                  fontSize: "30px",
+                  fontWeight: "700",
+                  marginTop: "8px",
+                }}
+              >
+                ₹{money(totalExpenses)}
+              </div>
             </div>
-            <div style={{ background: "#161a1f", padding: "24px", borderRadius: "16px", border: "1px solid #242b35" }}>
-              <div style={{ color: "#9ca3af", fontSize: "13px", marginBottom: "6px" }}>NET WALLET SAVINGS</div>
-              <div style={{ fontSize: "28px", fontWeight: "700", color: netSavings >= 0 ? "#3b82f6" : "#f59e0b" }}>₹{netSavings.toLocaleString()}</div>
+
+            {/* SAVINGS */}
+
+            <div
+              style={{
+                background: "#161a1f",
+                border: "1px solid #242b35",
+                borderRadius: "16px",
+                padding: "25px",
+              }}
+            >
+              <div
+                style={{
+                  color: "#9ca3af",
+                  fontSize: "13px",
+                }}
+              >
+                NET SAVINGS
+              </div>
+
+              <div
+                style={{
+                  color:
+                    netSavings >= 0
+                      ? "#3b82f6"
+                      : "#f59e0b",
+                  fontSize: "30px",
+                  fontWeight: "700",
+                  marginTop: "8px",
+                }}
+              >
+                ₹{money(netSavings)}
+              </div>
             </div>
           </div>
 
-          <div style={{ background: "#161a1f", padding: "24px", borderRadius: "16px", border: "1px solid #242b35" }}>
-            <h3 style={{ marginBottom: "20px" }}>📜 Extracted Transaction History</h3>
-            <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
+          {/* ====================================
+              TRANSACTION TABLE
+          ==================================== */}
+
+          <div
+            style={{
+              background: "#161a1f",
+              border: "1px solid #242b35",
+              borderRadius: "16px",
+              padding: "25px",
+              overflowX: "auto",
+            }}
+          >
+            <h2
+              style={{
+                marginTop: 0,
+              }}
+            >
+              📜 Your Transaction History
+            </h2>
+
+            <table
+              style={{
+                width: "100%",
+                minWidth: "700px",
+                borderCollapse: "collapse",
+              }}
+            >
               <thead>
-                <tr style={{ borderBottom: "1px solid #242b35", color: "#9ca3af" }}>
-                  <th style={{ padding: "10px" }}>Date</th>
-                  <th style={{ padding: "10px" }}>Description</th>
-                  <th style={{ padding: "10px" }}>Category</th>
-                  <th style={{ padding: "10px", textAlign: "right" }}>Amount</th>
+                <tr
+                  style={{
+                    borderBottom:
+                      "1px solid #242b35",
+                    color: "#9ca3af",
+                  }}
+                >
+                  <th
+                    style={{
+                      padding: "12px",
+                      textAlign: "left",
+                    }}
+                  >
+                    Date
+                  </th>
+
+                  <th
+                    style={{
+                      padding: "12px",
+                      textAlign: "left",
+                    }}
+                  >
+                    Description
+                  </th>
+
+                  <th
+                    style={{
+                      padding: "12px",
+                      textAlign: "left",
+                    }}
+                  >
+                    Category
+                  </th>
+
+                  <th
+                    style={{
+                      padding: "12px",
+                      textAlign: "right",
+                    }}
+                  >
+                    Amount
+                  </th>
                 </tr>
               </thead>
+
               <tbody>
-                {transactions.map((txn, idx) => (
-                  <tr key={txn.id || idx} style={{ borderBottom: "1px solid #1f262e" }}>
-                    <td style={{ padding: "12px 10px", color: "#9ca3af" }}>{txn.transaction_date || txn.date || "N/A"}</td>
-                    <td style={{ padding: "12px 10px", fontWeight: "500" }}>{txn.description}</td>
-                    <td style={{ padding: "12px 10px" }}>
-                      <span style={{ background: "rgba(255,69,0,0.1)", color: "#ff4500", padding: "4px 8px", borderRadius: "6px", fontSize: "12px" }}>
-                        {txn.category || "General"}
-                      </span>
-                    </td>
-                    <td style={{ padding: "12px 10px", textAlign: "right", fontWeight: "700", color: txn.amount > 0 || String(txn.type).toLowerCase() === "credit" ? "#10b981" : "#ffffff" }}>
-                      ₹{Math.abs(Number(txn.amount || 0)).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
+                {transactions.map(
+                  (transaction, index) => {
+                    const amount = Number(
+                      transaction.amount || 0
+                    );
+
+                    const type = String(
+                      transaction.type || ""
+                    ).toLowerCase();
+
+                    const isCredit =
+                      amount > 0 ||
+                      type === "credit" ||
+                      type === "cr" ||
+                      type === "income";
+
+                    return (
+                      <tr
+                        key={
+                          transaction.id ||
+                          index
+                        }
+                        style={{
+                          borderBottom:
+                            "1px solid #242b35",
+                        }}
+                      >
+                        <td
+                          style={{
+                            padding: "14px 12px",
+                            color: "#9ca3af",
+                          }}
+                        >
+                          {transaction.transaction_date ||
+                            transaction.date ||
+                            "N/A"}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px 12px",
+                          }}
+                        >
+                          {transaction.description ||
+                            "Bank Transaction"}
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px 12px",
+                          }}
+                        >
+                          <span
+                            style={{
+                              background:
+                                "rgba(255,69,0,0.12)",
+                              color: "#ff7043",
+                              padding:
+                                "5px 9px",
+                              borderRadius:
+                                "6px",
+                              fontSize: "12px",
+                            }}
+                          >
+                            {transaction.category ||
+                              "General"}
+                          </span>
+                        </td>
+
+                        <td
+                          style={{
+                            padding: "14px 12px",
+                            textAlign: "right",
+                            fontWeight: "700",
+                            color: isCredit
+                              ? "#10b981"
+                              : "#ef4444",
+                          }}
+                        >
+                          {isCredit ? "+" : "-"}₹
+                          {money(
+                            Math.abs(amount)
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  }
+                )}
               </tbody>
             </table>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
