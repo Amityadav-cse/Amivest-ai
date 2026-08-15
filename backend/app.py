@@ -5,11 +5,19 @@ from pathlib import Path
 import os
 
 
+# =====================================================
+# ENVIRONMENT
+# =====================================================
+
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 
 load_dotenv(dotenv_path=ENV_PATH)
 
+
+# =====================================================
+# APP
+# =====================================================
 
 app = Flask(__name__)
 
@@ -24,8 +32,12 @@ app.config["SECRET_KEY"] = os.getenv(
 )
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SECURE"] = False
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+# HTTPS is used on Render/Vercel
+app.config["SESSION_COOKIE_SECURE"] = True
+
+# Needed for frontend -> backend requests
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
 
 
 # =====================================================
@@ -34,12 +46,32 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 CORS(
     app,
+    resources={
+        r"/*": {
+            "origins": [
+                # Vercel production
+                "https://amivest-ai-iota.vercel.app",
+
+                # Local development
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:5174",
+                "http://localhost:5173",
+                "http://localhost:5174"
+            ]
+        }
+    },
     supports_credentials=True,
-    origins=[
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-        "http://localhost:5173",
-        "http://localhost:5174"
+    methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+    ],
+    allow_headers=[
+        "Content-Type",
+        "Authorization"
     ]
 )
 
