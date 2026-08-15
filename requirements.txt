@@ -58,3 +58,4 @@ zipp==3.23.1
 grpcio==1.71.2
 grpcio-status==1.71.2
 protobuf==5.29.6
+gunicorn==23.0.0
