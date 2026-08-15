@@ -54,3 +54,7 @@ urllib3==1.26.20
 websockets==15.0.1
 Werkzeug==3.1.8
 zipp==3.23.1
+
+grpcio==1.71.2
+grpcio-status==1.71.2
+protobuf==5.29.6
