@@ -1,29 +1,9 @@
 import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 
-const BASE_IP = "http://127.0.0.1:5000";
-const BASE_LOCAL = "http://localhost:5000";
-
-async function apiCall(path, options = {}) {
-  const urls = [path, `${BASE_IP}${path}`, `${BASE_LOCAL}${path}`];
-  const attempts = [];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
-        headers: { "Content-Type": "application/json" },
-        ...options,
-      });
-      let body = null, parseFailed = false;
-      try { body = await res.json(); } catch (_) { parseFailed = true; }
-      if (res.ok && !parseFailed) return body || {};
-      if (res.ok && parseFailed) { attempts.push(`${url} → HTTP ${res.status} but not JSON`); continue; }
-      attempts.push(`${url} → HTTP ${res.status}: ${(body && (body.message || body.error)) || "no details"}`);
-    } catch (err) {
-      attempts.push(`${url} → ${err.name}: ${err.message}`);
-    }
-  }
-  throw new Error(attempts.join("\n"));
-}
+const API_URL =
+  import.meta.env.VITE_API_URL ||
+  "http://127.0.0.1:5000";
 
 export default function Register() {
   const navigate = useNavigate();
@@ -31,51 +11,111 @@ export default function Register() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+
+  const [termsAccepted, setTermsAccepted] =
+    useState(false);
+
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const handleRegister = async (e) => {
     e.preventDefault();
 
-    if (!name || !email || !password) {
-      alert("Please fill in all fields");
+    setError("");
+
+    if (!name.trim() || !email.trim() || !password) {
+      setError("Please fill in all fields.");
+      return;
+    }
+
+    if (password.length < 6) {
+      setError(
+        "Password must be at least 6 characters."
+      );
+      return;
+    }
+
+    if (!termsAccepted) {
+      setError(
+        "Please accept the Terms & Conditions."
+      );
       return;
     }
 
     setLoading(true);
 
     try {
-      const data = await apiCall("/register", {
-        method: "POST",
-        body: JSON.stringify({ name: name.trim(), email: email.trim(), password }),
-      });
+      const response = await fetch(
+        `${API_URL}/register`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            name: name.trim(),
+            email: email.trim(),
+            password,
+            termsAccepted,
+          }),
+        }
+      );
 
-      if (data.success) {
-        alert("✅ Registration Successful — please log in");
-        navigate("/login");
-      } else {
-        alert(data.message || "Could not create your account.");
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.message ||
+            "Could not create your account."
+        );
       }
-    } catch (err) {
-      alert(`Cannot connect to backend.\n\nDetails:\n${err.message}`);
-    }
 
-    setLoading(false);
+      alert(
+        "✅ Registration Successful. Please login."
+      );
+
+      navigate("/login");
+
+    } catch (err) {
+      setError(
+        err.message ||
+          "Unable to register."
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <div style={containerStyle}>
       <div style={cardStyle}>
-        <h2 style={{ color: "white", textAlign: "center", marginBottom: 25 }}>
+
+        <h2 style={titleStyle}>
           Amivest AI Register
         </h2>
 
+        <p style={subtitleStyle}>
+          Create your financial guardian account
+        </p>
+
+        {error && (
+          <div style={errorStyle}>
+            ⚠️ {error}
+          </div>
+        )}
+
         <form onSubmit={handleRegister}>
+
           <input
             style={inputStyle}
             type="text"
-            placeholder="Name"
+            placeholder="Full Name"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) =>
+              setName(e.target.value)
+            }
+            autoComplete="name"
           />
 
           <input
@@ -83,7 +123,10 @@ export default function Register() {
             type="email"
             placeholder="Email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) =>
+              setEmail(e.target.value)
+            }
+            autoComplete="email"
           />
 
           <input
@@ -91,20 +134,69 @@ export default function Register() {
             type="password"
             placeholder="Password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) =>
+              setPassword(e.target.value)
+            }
+            autoComplete="new-password"
           />
 
-          <button type="submit" disabled={loading} style={buttonStyle}>
-            {loading ? "Registering..." : "Register"}
+          <label style={termsStyle}>
+
+            <input
+              type="checkbox"
+              checked={termsAccepted}
+              onChange={(e) =>
+                setTermsAccepted(
+                  e.target.checked
+                )
+              }
+            />
+
+            <span>
+              I agree to the{" "}
+              <Link
+                to="/terms"
+                style={linkStyle}
+              >
+                Terms & Conditions
+              </Link>{" "}
+              and{" "}
+              <Link
+                to="/privacy"
+                style={linkStyle}
+              >
+                Privacy Policy
+              </Link>
+            </span>
+
+          </label>
+
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              ...buttonStyle,
+              opacity: loading ? 0.6 : 1,
+            }}
+          >
+            {loading
+              ? "Creating Account..."
+              : "Create Account"}
           </button>
+
         </form>
 
-        <p style={{ color: "#94a3b8", textAlign: "center", marginTop: 20 }}>
+        <p style={loginTextStyle}>
           Already have an account?{" "}
-          <Link to="/login" style={{ color: "#14b8a6", fontWeight: "bold", textDecoration: "none" }}>
+
+          <Link
+            to="/login"
+            style={linkStyle}
+          >
             Login
           </Link>
         </p>
+
       </div>
     </div>
   );
@@ -116,14 +208,38 @@ const containerStyle = {
   display: "flex",
   justifyContent: "center",
   alignItems: "center",
+  padding: "20px",
 };
 
 const cardStyle = {
-  width: 420,
+  width: "100%",
+  maxWidth: 420,
   background: "#1e293b",
   padding: 30,
-  borderRadius: 12,
-  boxShadow: "0 0 25px rgba(0,0,0,.3)",
+  borderRadius: 14,
+  boxShadow: "0 0 30px rgba(0,0,0,.35)",
+  boxSizing: "border-box",
+};
+
+const titleStyle = {
+  color: "#fff",
+  textAlign: "center",
+  marginBottom: 8,
+};
+
+const subtitleStyle = {
+  color: "#94a3b8",
+  textAlign: "center",
+  marginBottom: 25,
+};
+
+const errorStyle = {
+  background: "#3f1515",
+  border: "1px solid #ef4444",
+  color: "#fca5a5",
+  padding: 12,
+  borderRadius: 8,
+  marginBottom: 18,
 };
 
 const inputStyle = {
@@ -133,7 +249,7 @@ const inputStyle = {
   borderRadius: 8,
   border: "1px solid #334155",
   background: "#0f172a",
-  color: "white",
+  color: "#fff",
   fontSize: 15,
   boxSizing: "border-box",
 };
@@ -141,11 +257,33 @@ const inputStyle = {
 const buttonStyle = {
   width: "100%",
   padding: 14,
+  marginTop: 18,
   background: "#14b8a6",
-  color: "white",
+  color: "#fff",
   border: "none",
   borderRadius: 8,
   fontSize: 16,
   fontWeight: "bold",
   cursor: "pointer",
+};
+
+const termsStyle = {
+  display: "flex",
+  gap: 9,
+  alignItems: "flex-start",
+  color: "#94a3b8",
+  fontSize: 12,
+  lineHeight: 1.5,
+};
+
+const linkStyle = {
+  color: "#14b8a6",
+  fontWeight: "bold",
+  textDecoration: "none",
+};
+
+const loginTextStyle = {
+  color: "#94a3b8",
+  textAlign: "center",
+  marginTop: 20,
 };
