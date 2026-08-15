@@ -15,6 +15,9 @@ export default function Register() {
   const [termsAccepted, setTermsAccepted] =
     useState(false);
 
+  const [legalModal, setLegalModal] =
+    useState(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -23,7 +26,11 @@ export default function Register() {
 
     setError("");
 
-    if (!name.trim() || !email.trim() || !password) {
+    if (
+      !name.trim() ||
+      !email.trim() ||
+      !password
+    ) {
       setError("Please fill in all fields.");
       return;
     }
@@ -37,7 +44,7 @@ export default function Register() {
 
     if (!termsAccepted) {
       setError(
-        "Please accept the Terms & Conditions."
+        "Please accept the Terms & Conditions and Privacy Policy."
       );
       return;
     }
@@ -57,12 +64,14 @@ export default function Register() {
             name: name.trim(),
             email: email.trim(),
             password,
-            termsAccepted,
+            termsAccepted: true,
           }),
         }
       );
 
       const data = await response.json();
+
+      console.log("REGISTER RESPONSE:", data);
 
       if (!response.ok || !data.success) {
         throw new Error(
@@ -72,12 +81,13 @@ export default function Register() {
       }
 
       alert(
-        "✅ Registration Successful. Please login."
+        "✅ Registration Successful!\n\nPlease login to continue."
       );
 
       navigate("/login");
-
     } catch (err) {
+      console.error("REGISTER ERROR:", err);
+
       setError(
         err.message ||
           "Unable to register."
@@ -92,11 +102,11 @@ export default function Register() {
       <div style={cardStyle}>
 
         <h2 style={titleStyle}>
-          Amivest AI Register
+          Amivest AI
         </h2>
 
         <p style={subtitleStyle}>
-          Create your financial guardian account
+          Create your AI Financial Guardian account
         </p>
 
         {error && (
@@ -140,36 +150,53 @@ export default function Register() {
             autoComplete="new-password"
           />
 
-          <label style={termsStyle}>
+          {/* TERMS CHECKBOX */}
+
+          <div style={termsBoxStyle}>
 
             <input
+              id="registerTerms"
               type="checkbox"
               checked={termsAccepted}
-              onChange={(e) =>
+              onChange={(e) => {
                 setTermsAccepted(
                   e.target.checked
-                )
-              }
+                );
+                setError("");
+              }}
+              style={checkboxStyle}
             />
 
-            <span>
+            <label
+              htmlFor="registerTerms"
+              style={termsLabelStyle}
+            >
               I agree to the{" "}
-              <Link
-                to="/terms"
-                style={linkStyle}
+
+              <button
+                type="button"
+                onClick={() =>
+                  setLegalModal("terms")
+                }
+                style={legalButtonStyle}
               >
                 Terms & Conditions
-              </Link>{" "}
-              and{" "}
-              <Link
-                to="/privacy"
-                style={linkStyle}
+              </button>
+
+              {" "}and{" "}
+
+              <button
+                type="button"
+                onClick={() =>
+                  setLegalModal("privacy")
+                }
+                style={legalButtonStyle}
               >
                 Privacy Policy
-              </Link>
-            </span>
+              </button>
+            </label>
 
-          </label>
+          </div>
 
           <button
             type="submit"
@@ -177,6 +204,9 @@ export default function Register() {
             style={{
               ...buttonStyle,
               opacity: loading ? 0.6 : 1,
+              cursor: loading
+                ? "not-allowed"
+                : "pointer",
             }}
           >
             {loading
@@ -198,9 +228,134 @@ export default function Register() {
         </p>
 
       </div>
+
+      {/* LEGAL MODAL */}
+
+      {legalModal && (
+        <LegalModal
+          type={legalModal}
+          onClose={() =>
+            setLegalModal(null)
+          }
+        />
+      )}
+
     </div>
   );
 }
+
+
+// =====================================================
+// LEGAL MODAL
+// =====================================================
+
+function LegalModal({ type, onClose }) {
+  const isTerms = type === "terms";
+
+  return (
+    <div style={modalOverlayStyle}>
+
+      <div style={modalStyle}>
+
+        <div style={modalHeaderStyle}>
+
+          <h3 style={{ margin: 0 }}>
+            {isTerms
+              ? "Terms & Conditions"
+              : "Privacy Policy"}
+          </h3>
+
+          <button
+            type="button"
+            onClick={onClose}
+            style={closeButtonStyle}
+          >
+            ✕
+          </button>
+
+        </div>
+
+        <div style={modalContentStyle}>
+
+          {isTerms ? (
+            <>
+              <h4>1. Acceptance</h4>
+              <p>
+                By using Amivest AI, you agree to
+                these Terms & Conditions.
+              </p>
+
+              <h4>2. Account</h4>
+              <p>
+                You are responsible for keeping
+                your account information secure.
+              </p>
+
+              <h4>3. Financial Information</h4>
+              <p>
+                Amivest AI provides educational
+                and informational financial
+                assistance. It does not guarantee
+                investment returns.
+              </p>
+
+              <h4>4. Responsible Use</h4>
+              <p>
+                You agree to use the application
+                lawfully and responsibly.
+              </p>
+            </>
+          ) : (
+            <>
+              <h4>1. Information</h4>
+              <p>
+                Amivest AI may collect information
+                such as your name and email to
+                provide account services.
+              </p>
+
+              <h4>2. Security</h4>
+              <p>
+                We use reasonable security
+                measures to protect your account
+                information.
+              </p>
+
+              <h4>3. Your Data</h4>
+              <p>
+                Your information is used to
+                provide and improve Amivest AI
+                services.
+              </p>
+
+              <h4>4. Contact</h4>
+              <p>
+                You can contact the Amivest AI
+                team regarding privacy questions.
+              </p>
+            </>
+          )}
+
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          style={modalDoneButtonStyle}
+        >
+          Close
+        </button>
+
+      </div>
+
+    </div>
+  );
+}
+
+
+// =====================================================
+// STYLES
+// =====================================================
 
 const containerStyle = {
   minHeight: "100vh",
@@ -209,6 +364,7 @@ const containerStyle = {
   justifyContent: "center",
   alignItems: "center",
   padding: "20px",
+  boxSizing: "border-box",
 };
 
 const cardStyle = {
@@ -225,6 +381,7 @@ const titleStyle = {
   color: "#fff",
   textAlign: "center",
   marginBottom: 8,
+  fontSize: 28,
 };
 
 const subtitleStyle = {
@@ -240,6 +397,7 @@ const errorStyle = {
   padding: 12,
   borderRadius: 8,
   marginBottom: 18,
+  fontSize: 14,
 };
 
 const inputStyle = {
@@ -252,6 +410,7 @@ const inputStyle = {
   color: "#fff",
   fontSize: 15,
   boxSizing: "border-box",
+  outline: "none",
 };
 
 const buttonStyle = {
@@ -264,16 +423,38 @@ const buttonStyle = {
   borderRadius: 8,
   fontSize: 16,
   fontWeight: "bold",
-  cursor: "pointer",
 };
 
-const termsStyle = {
+const termsBoxStyle = {
   display: "flex",
-  gap: 9,
   alignItems: "flex-start",
+  gap: 9,
+  marginTop: 4,
+};
+
+const checkboxStyle = {
+  marginTop: 3,
+  width: 16,
+  height: 16,
+  cursor: "pointer",
+  accentColor: "#14b8a6",
+  flexShrink: 0,
+};
+
+const termsLabelStyle = {
   color: "#94a3b8",
   fontSize: 12,
-  lineHeight: 1.5,
+  lineHeight: 1.6,
+};
+
+const legalButtonStyle = {
+  background: "none",
+  border: "none",
+  padding: 0,
+  color: "#14b8a6",
+  fontWeight: "bold",
+  cursor: "pointer",
+  fontSize: 12,
 };
 
 const linkStyle = {
@@ -286,4 +467,68 @@ const loginTextStyle = {
   color: "#94a3b8",
   textAlign: "center",
   marginTop: 20,
+};
+
+
+// =====================================================
+// MODAL STYLES
+// =====================================================
+
+const modalOverlayStyle = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,.75)",
+  display: "flex",
+  justifyContent: "center",
+  alignItems: "center",
+  padding: 20,
+  zIndex: 9999,
+};
+
+const modalStyle = {
+  width: "100%",
+  maxWidth: 550,
+  maxHeight: "80vh",
+  background: "#1e293b",
+  borderRadius: 14,
+  boxShadow: "0 0 40px rgba(0,0,0,.6)",
+  overflow: "hidden",
+};
+
+const modalHeaderStyle = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  padding: "18px 22px",
+  color: "#fff",
+  borderBottom: "1px solid #334155",
+};
+
+const closeButtonStyle = {
+  background: "transparent",
+  border: "none",
+  color: "#94a3b8",
+  fontSize: 20,
+  cursor: "pointer",
+};
+
+const modalContentStyle = {
+  padding: "20px 22px",
+  color: "#cbd5e1",
+  fontSize: 14,
+  lineHeight: 1.6,
+  overflowY: "auto",
+  maxHeight: "55vh",
+};
+
+const modalDoneButtonStyle = {
+  margin: "0 22px 20px",
+  width: "calc(100% - 44px)",
+  padding: 12,
+  background: "#14b8a6",
+  color: "#fff",
+  border: "none",
+  borderRadius: 8,
+  fontWeight: "bold",
+  cursor: "pointer",
 };
