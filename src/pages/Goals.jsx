@@ -1,11 +1,12 @@
-import { useState, useEffect, useMemo } from "react";
-import BudgetLimits from "./BudgetLimits";
+import { useState, useEffect } from "react";
+import BudgetLimits from "./BudgetLimits"; // CHANGED: added
 
 // ==========================================
-// CONFIG — production + local
+// CONFIG
 // ==========================================
-const API_BASE =
-  import.meta.env.VITE_BACKEND_URL?.trim() || "";
+const API_URL = (
+  import.meta.env.VITE_API_URL || "/api"
+).replace(/\/$/, "");
 
 const CATEGORIES = [
   { key: "Emergency Fund", icon: "🛟", color: "#EF4444" },
@@ -16,40 +17,39 @@ const CATEGORIES = [
   { key: "Retirement", icon: "🌴", color: "#10B981" },
 ];
 
-const categoryMeta = (key) =>
-  CATEGORIES.find((c) => c.key === key) || { icon: "🎯", color: "#0D9488" };
+const categoryMeta = (key) => CATEGORIES.find((c) => c.key === key) || { icon: "🎯", color: "#0D9488" };
 
 const currency = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 
 async function apiCall(path, options = {}) {
-  const url = `${API_BASE}${path}`;
-  const method = (options.method || "GET").toUpperCase();
-
-  const response = await fetch(url, {
+  const response = await fetch(`${API_URL}${path}`, {
     ...options,
-    method,
     credentials: "include",
     headers: {
-      ...(method !== "GET" ? { "Content-Type": "application/json" } : {}),
+      ...(options.method && options.method.toUpperCase() !== "GET"
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...(options.headers || {}),
     },
   });
 
-  let body = {};
+  let data = null;
   try {
-    body = await response.json();
-  } catch (_) {}
+    data = await response.json();
+  } catch (_) {
+    throw new Error(`Server returned HTTP ${response.status} with an invalid response.`);
+  }
 
   if (!response.ok) {
     throw new Error(
-      body?.error ||
-        body?.message ||
-        `Request failed with HTTP ${response.status}`
+      data?.error ||
+      data?.message ||
+      `Request failed with HTTP ${response.status}.`
     );
   }
 
-  return body;
+  return data || {};
 }
 
 function downloadCertificate(goal) {
@@ -334,8 +334,7 @@ function CreateGoalModal({ onClose, onCreated }) {
             <label style={labelStyle}>Goal name</label>
             <input
               value={form.goal_name}
-              onChange={(e) =
-              autoComplete="off"> update("goal_name", e.target.value)}
+              onChange={(e) => update("goal_name", e.target.value)}
               placeholder="e.g. Emergency Fund"
               style={inputStyle}
             />
@@ -375,8 +374,7 @@ function CreateGoalModal({ onClose, onCreated }) {
               <input
                 type="number"
                 value={form.target_amount}
-                onChange={(e) =
-              autoComplete="off"> update("target_amount", e.target.value)}
+                onChange={(e) => update("target_amount", e.target.value)}
                 placeholder="200000"
                 style={inputStyle}
               />
@@ -386,8 +384,7 @@ function CreateGoalModal({ onClose, onCreated }) {
               <input
                 type="date"
                 value={form.target_date}
-                onChange={(e) =
-              autoComplete="off"> update("target_date", e.target.value)}
+                onChange={(e) => update("target_date", e.target.value)}
                 style={inputStyle}
               />
             </div>
@@ -415,8 +412,7 @@ function CreateGoalModal({ onClose, onCreated }) {
             <input
               type="number"
               value={form.monthly_saving}
-              onChange={(e) =
-              autoComplete="off"> update("monthly_saving", e.target.value)}
+              onChange={(e) => update("monthly_saving", e.target.value)}
               placeholder="e.g. 8000"
               style={inputStyle}
             />
@@ -642,8 +638,7 @@ function GoalDetailModal({ goal, onClose, onUpdated, onDeleted }) {
               <input
                 type="number"
                 value={addAmount}
-                onChange={(e) =
-              autoComplete="off"> setAddAmount(e.target.value)}
+                onChange={(e) => setAddAmount(e.target.value)}
                 placeholder="Amount in ₹"
                 style={{ ...inputStyle, flex: 1 }}
               />
@@ -880,241 +875,6 @@ function SuggestionBanner({ onApplied, refreshKey }) {
   );
 }
 
-
-// ===================================================
-// Goal Intelligence — practical "what happens next"
-// Uses only the goal data already returned by the backend.
-// ===================================================
-function GoalIntelligence({ goals, transactions = [] }) {
-  const [extraMonthly, setExtraMonthly] = useState(0);
-
-  const insight = useMemo(() => {
-    if (!goals.length) return null;
-
-    const today = new Date();
-    const active = goals.filter(
-      (g) => Number(g.target_amount) > Number(g.current_saved || 0)
-    );
-
-    let totalTarget = 0;
-    let totalSaved = 0;
-    let monthlyNeed = 0;
-    let atRisk = 0;
-    let onTrack = 0;
-
-    const details = active.map((g) => {
-      const target = Number(g.target_amount || 0);
-      const saved = Number(g.current_saved || 0);
-      const monthly = Number(g.monthly_saving || 0);
-      const remaining = Math.max(0, target - saved);
-
-      let months = 0;
-      if (g.target_date) {
-        const targetDate = new Date(`${g.target_date}T00:00:00`);
-        months = Math.max(
-          1,
-          (targetDate.getFullYear() - today.getFullYear()) * 12 +
-            targetDate.getMonth() -
-            today.getMonth()
-        );
-      }
-
-      const required = months > 0 ? remaining / months : remaining;
-      const pace = monthly > 0 ? monthly / Math.max(required, 1) : 0;
-      const risk = months > 0 && monthly > 0 && pace < 0.85;
-      if (risk) atRisk += 1;
-      else onTrack += 1;
-
-      totalTarget += target;
-      totalSaved += saved;
-      monthlyNeed += required;
-
-      return {
-        ...g,
-        remaining,
-        required,
-        pace,
-        months,
-        risk,
-      };
-    });
-
-    const income = transactions
-      .filter((t) => String(t.type || "").toLowerCase() === "income")
-      .reduce((s, t) => s + Number(t.amount || 0), 0);
-
-    const expense = transactions
-      .filter((t) => String(t.type || "").toLowerCase() === "expense")
-      .reduce((s, t) => s + Number(t.amount || 0), 0);
-
-    const cashflow = income - expense;
-    const safeExtra = Math.max(0, Math.floor(cashflow * 0.25));
-    const totalMonthlyPlan =
-      active.reduce((s, g) => s + Number(g.monthly_saving || 0), 0);
-
-    const health = Math.max(
-      0,
-      Math.min(
-        100,
-        Math.round(
-          active.length
-            ? active.reduce((s, g) => s + Math.min(100, g.pace * 100), 0) /
-                active.length
-            : 100
-        )
-      )
-    );
-
-    return {
-      active,
-      details,
-      totalTarget,
-      totalSaved,
-      monthlyNeed,
-      totalMonthlyPlan,
-      cashflow,
-      safeExtra,
-      health,
-      atRisk,
-      onTrack,
-    };
-  }, [goals, transactions]);
-
-  if (!insight) return null;
-
-  const projected = insight.details.map((g) => {
-    const plan = Number(g.monthly_saving || 0) + Number(extraMonthly || 0);
-    const months = plan > 0 ? Math.ceil(g.remaining / plan) : Infinity;
-    return { ...g, projectedMonths: months };
-  });
-
-  const healthLabel =
-    insight.health >= 85
-      ? "Excellent pace"
-      : insight.health >= 65
-      ? "Mostly on track"
-      : insight.health >= 40
-      ? "Needs attention"
-      : "At risk";
-
-  return (
-    <div
-      style={{
-        background:
-          "linear-gradient(135deg, rgba(13,148,136,.16), rgba(15,23,42,.9))",
-        border: "1px solid #245d5a",
-        borderRadius: "16px",
-        padding: "20px",
-        marginBottom: "26px",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          gap: "16px",
-          alignItems: "flex-start",
-          flexWrap: "wrap",
-          marginBottom: "18px",
-        }}
-      >
-        <div>
-          <div style={{ color: "#5eead4", fontSize: "11px", fontWeight: "800", letterSpacing: ".12em" }}>
-            FINSAATHI GOAL INTELLIGENCE
-          </div>
-          <h3 style={{ color: "#fff", margin: "6px 0 4px", fontSize: "20px" }}>
-            Your goals have a live action plan
-          </h3>
-          <div style={{ color: "#94a3b8", fontSize: "12px" }}>
-            Indicative planning based on your saved amounts, target dates and available transaction data.
-          </div>
-        </div>
-        <div
-          style={{
-            minWidth: "120px",
-            textAlign: "center",
-            background: "#071019",
-            border: "1px solid #243241",
-            borderRadius: "12px",
-            padding: "12px",
-          }}
-        >
-          <div style={{ color: "#6b7280", fontSize: "10px" }}>GOAL HEALTH</div>
-          <div style={{ color: insight.health >= 65 ? "#10B981" : "#F59E0B", fontSize: "28px", fontWeight: "800" }}>
-            {insight.health}
-          </div>
-          <div style={{ color: "#CBD5E1", fontSize: "11px" }}>{healthLabel}</div>
-        </div>
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit,minmax(145px,1fr))",
-          gap: "10px",
-          marginBottom: "16px",
-        }}
-      >
-        {[
-          ["🎯", "Active goals", insight.active.length],
-          ["💰", "Saved", currency(insight.totalSaved)],
-          ["📅", "Required / month", currency(insight.monthlyNeed)],
-          ["⚠️", "Need attention", insight.atRisk],
-        ].map(([icon, label, value]) => (
-          <div key={label} style={{ background: "#071019", border: "1px solid #243241", borderRadius: "11px", padding: "12px" }}>
-            <div style={{ fontSize: "11px", color: "#6b7280" }}>{icon} {label}</div>
-            <div style={{ color: "#fff", fontSize: "16px", fontWeight: "800", marginTop: "5px" }}>{value}</div>
-          </div>
-        ))}
-      </div>
-
-      {insight.cashflow > 0 && (
-        <div style={{ background: "#071019", borderRadius: "11px", padding: "14px", marginBottom: "14px" }}>
-          <div style={{ color: "#CBD5E1", fontSize: "12px", marginBottom: "8px" }}>
-            What-if planner: add extra money to your goal plan
-          </div>
-          <input
-            type="range"
-            min="0"
-            max={Math.max(1000, Math.round(insight.safeExtra * 2))}
-            step="500"
-            value={extraMonthly}
-            onChange={(e) =
-              autoComplete="off"> setExtraMonthly(Number(e.target.value))}
-            style={{ width: "100%" }}
-          />
-          <div style={{ display: "flex", justifyContent: "space-between", color: "#94a3b8", fontSize: "11px", marginTop: "5px" }}>
-            <span>Extra: {currency(extraMonthly)}/month</span>
-            <span>Suggested ceiling: {currency(insight.safeExtra)}</span>
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-        {projected.slice(0, 4).map((g) => (
-          <div key={g.id} style={{ background: "#071019", borderRadius: "10px", padding: "12px 14px", border: "1px solid #1d2935" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
-              <div>
-                <span style={{ color: "#fff", fontWeight: "700", fontSize: "13px" }}>{g.goal_name}</span>
-                <span style={{ color: "#64748b", fontSize: "11px", marginLeft: "8px" }}>
-                  {g.risk ? "⚠️ behind pace" : "✓ on pace"}
-                </span>
-              </div>
-              <span style={{ color: "#5eead4", fontSize: "12px", fontWeight: "700" }}>
-                {g.projectedMonths === Infinity ? "No monthly plan" : `~${g.projectedMonths} months`}
-              </span>
-            </div>
-            <div style={{ color: "#94a3b8", fontSize: "11px", marginTop: "5px" }}>
-              Need {currency(g.remaining)} more · Recommended baseline {currency(g.required)}/month
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-
 export default function Goals({ transactions } = {}) {
   const [goals, setGoals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1128,7 +888,6 @@ export default function Goals({ transactions } = {}) {
     setError("");
     try {
       const data = await apiCall("/goals", { method: "GET" });
-      if (data.success === false) throw new Error(data.error || "Could not load goals.");
       setGoals(Array.isArray(data.goals) ? data.goals : []);
     } catch (err) {
       setError(err.message || "Could not load your goals.");
@@ -1180,11 +939,7 @@ export default function Goals({ transactions } = {}) {
         )}
       </div>
 
-      <SummaryStats refreshKey={goals.length + goals.reduce((sum, g) => sum + Number(g.current_saved || 0), 0)} />
-
-      {!loading && !error && goals.length > 0 && (
-        <GoalIntelligence goals={goals} transactions={transactions || []} />
-      )}
+      <SummaryStats refreshKey={goals.length + goals.reduce((sum, g) => sum + g.current_saved, 0)} />
 
       {/* CHANGED: added — real spending-limit tracker */}
       <BudgetLimits />

@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://127.0.0.1:5000";
+// Production-safe API base.
+// Vercel uses the same-origin /api proxy (see vercel.json).
+// Local Vite can also proxy /api to Flask.
+const API_URL = (
+  import.meta.env.VITE_API_URL || "/api"
+).replace(/\/$/, "");
 
 const GOOGLE_CLIENT_ID =
   import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
@@ -683,6 +686,7 @@ export default function Login() {
             <input
               style={inputStyle}
               type="email"
+              name="email"
               placeholder="Email"
               value={email}
               onChange={(e) =>
@@ -696,6 +700,7 @@ export default function Login() {
             <input
               style={inputStyle}
               type="password"
+              name="password"
               placeholder="Password"
               value={password}
               onChange={(e) =>
@@ -741,6 +746,7 @@ export default function Login() {
             <input
               style={inputStyle}
               type="email"
+              name="otpEmail"
               placeholder="Enter your email"
               value={email}
               onChange={(e) =>
