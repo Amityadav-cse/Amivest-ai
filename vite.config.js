@@ -4,42 +4,23 @@ import react from "@vitejs/plugin-react";
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, process.cwd(), "");
 
-    // =====================================================
-    // BACKEND URL
-    // =====================================================
-    //
-    // Local:
-    // VITE_BACKEND_URL=http://127.0.0.1:5000
-    //
-    // Production:
-    // VITE_BACKEND_URL=https://YOUR-RENDER-BACKEND.onrender.com
-    //
+    let backend = env.VITE_BACKEND_URL;
 
-    const backend =
-        env.VITE_BACKEND_URL ? .trim() ||
-        "http://127.0.0.1:5000";
+    if (!backend) {
+        backend = "http://127.0.0.1:5000";
+    }
 
+    backend = backend.trim();
 
     return {
         plugins: [react()],
-
-
-        // =================================================
-        // DEVELOPMENT SERVER
-        // =================================================
 
         server: {
             host: "127.0.0.1",
             port: 5173,
             strictPort: true,
 
-
-            // =============================================
-            // LOCAL DEVELOPMENT PROXY
-            // =============================================
-
             proxy: {
-
                 "/chat": {
                     target: backend,
                     changeOrigin: true,
@@ -142,16 +123,6 @@ export default defineConfig(({ mode }) => {
                     secure: false,
                 },
             },
-        },
-
-
-        // =================================================
-        // PREVIEW SERVER
-        // =================================================
-
-        preview: {
-            host: "0.0.0.0",
-            port: 4173,
         },
     };
 });
