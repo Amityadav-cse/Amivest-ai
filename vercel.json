@@ -4,43 +4,7 @@
             "destination": "https://amivest-ai.onrender.com/:path*"
         },
         {
-            "source": "/login",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/dashboard",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/goals",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/loan",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/aitalk",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/investments",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/import",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/fraud",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/rbi",
-            "destination": "/index.html"
-        },
-        {
-            "source": "/tax",
+            "source": "/(.*)",
             "destination": "/index.html"
         }
     ]
