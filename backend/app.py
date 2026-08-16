@@ -5,11 +5,21 @@ from pathlib import Path
 import os
 
 
+# =====================================================
+# ENVIRONMENT
+# =====================================================
+
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 
+# Local .env is loaded if it exists.
+# On Render, environment variables come from Render itself.
 load_dotenv(dotenv_path=ENV_PATH)
 
+
+# =====================================================
+# APP
+# =====================================================
 
 app = Flask(__name__)
 
@@ -25,10 +35,20 @@ app.config["SECRET_KEY"] = os.getenv(
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 
-SESSION_COOKIE_SECURE = os.getenv(
-    "SESSION_COOKIE_SECURE",
-    "true" if os.getenv("RENDER") or os.getenv("FLASK_ENV") == "production" else "false"
-).lower() == "true"
+# Render/production = secure cookies
+# Local development = normal cookies
+IS_PRODUCTION = (
+    os.getenv("RENDER") is not None
+    or os.getenv("FLASK_ENV") == "production"
+)
+
+SESSION_COOKIE_SECURE = (
+    os.getenv(
+        "SESSION_COOKIE_SECURE",
+        "true" if IS_PRODUCTION else "false"
+    ).lower()
+    == "true"
+)
 
 app.config["SESSION_COOKIE_SECURE"] = SESSION_COOKIE_SECURE
 
@@ -43,18 +63,39 @@ app.config["SESSION_COOKIE_PATH"] = "/"
 # CORS
 # =====================================================
 
+# Your Vercel frontend
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "https://amivest-ai-iota.vercel.app"
+)
+
+ALLOWED_ORIGINS = [
+    FRONTEND_URL,
+
+    # Vercel production
+    "https://amivest-ai-iota.vercel.app",
+
+    # Local development
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://localhost:5173",
+    "http://localhost:5174",
+]
+
+# Remove duplicates and empty values
+ALLOWED_ORIGINS = list(
+    dict.fromkeys(
+        origin.strip()
+        for origin in ALLOWED_ORIGINS
+        if origin and origin.strip()
+    )
+)
+
 CORS(
     app,
     resources={
         r"/*": {
-            "origins": [
-                "https://amivest-ai-iota.vercel.app",
-
-                "http://127.0.0.1:5173",
-                "http://127.0.0.1:5174",
-                "http://localhost:5173",
-                "http://localhost:5174"
-            ]
+            "origins": ALLOWED_ORIGINS
         }
     },
     supports_credentials=True,
@@ -68,7 +109,11 @@ CORS(
     ],
     allow_headers=[
         "Content-Type",
-        "Authorization"
+        "Authorization",
+        "X-Requested-With"
+    ],
+    expose_headers=[
+        "Content-Type"
     ]
 )
 
@@ -113,7 +158,7 @@ app.register_blueprint(transaction)
 # HOME
 # =====================================================
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "success": True,
@@ -126,12 +171,21 @@ def home():
 # HEALTH
 # =====================================================
 
-@app.route("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "success": True,
         "status": "healthy"
     })
+
+
+# =====================================================
+# OPTIONS / CORS PREFLIGHT
+# =====================================================
+
+@app.route("/<path:path>", methods=["OPTIONS"])
+def handle_options(path):
+    return "", 204
 
 
 # =====================================================
@@ -152,7 +206,7 @@ def server_error(error):
     return jsonify({
         "success": False,
         "error": "Internal Server Error",
-        "message": str(error)
+        "message": "Internal server error."
     }), 500
 
 
@@ -161,8 +215,17 @@ def server_error(error):
 # =====================================================
 
 if __name__ == "__main__":
+
+    # IMPORTANT:
+    # 0.0.0.0 allows Render to access the Flask server.
+    host = "0.0.0.0"
+
+    # Render provides PORT automatically.
+    # Local machine falls back to 5000.
+    port = int(os.getenv("PORT", "5000"))
+
     app.run(
-        host="127.0.0.1",
-        port=5000,
-        debug=True
+        host=host,
+        port=port,
+        debug=not IS_PRODUCTION
     )
