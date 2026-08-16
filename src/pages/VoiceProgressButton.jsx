@@ -1,57 +1,118 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 
 // =========================================================
-// API & NETWORK CONFIGURATION (Multi-Port Resilient Engine)
-// Multi-host fallback supporting Ports 5001 & 5000
+// API & NETWORK CONFIGURATION
+// Live backend + authenticated Flask session
 // =========================================================
-const BASE_5001_IP = "http://127.0.0.1:5001";
-const BASE_5001_LOCAL = "http://localhost:5001";
-const BASE_5000_IP = "http://127.0.0.1:5000";
-const BASE_5000_LOCAL = "http://localhost:5000";
+// Keep the backend URL in one place.
+// If your Vite proxy is configured, you can set VITE_API_URL="" and
+// use relative URLs instead.
+const API_URL =
+  import.meta.env.VITE_API_URL?.trim() ||
+  "http://127.0.0.1:5000";
 
 async function apiCall(path, options = {}) {
-  const urls = [
-    `${BASE_5001_IP}${path}`,
-    `${BASE_5001_LOCAL}${path}`,
-    `${BASE_5000_IP}${path}`,
-    `${BASE_5000_LOCAL}${path}`,
-    path,
-  ];
   const method = (options.method || "GET").toUpperCase();
-  const attempts = [];
 
-  for (const url of urls) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000);
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    method,
+    credentials: "include", // IMPORTANT: sends the logged-in Flask session
+    headers: {
+      ...(method !== "GET" ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  });
 
-      const res = await fetch(url, {
-        ...(method !== "GET" ? { headers: { "Content-Type": "application/json" } } : {}),
-        ...options,
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      let body = null;
-      let parseFailed = false;
-      try {
-        body = await res.json();
-      } catch (_) {
-        parseFailed = true;
-      }
-
-      if (res.ok && !parseFailed) return body || {};
-      if (res.ok && parseFailed) {
-        attempts.push(`${url} → HTTP ${res.status} non-JSON`);
-        continue;
-      }
-      attempts.push(`${url} → HTTP ${res.status}: ${(body && (body.error || body.message)) || "Error"}`);
-    } catch (err) {
-      attempts.push(`${url} → ${err.name}: ${err.message}`);
-    }
+  let body = {};
+  try {
+    body = await response.json();
+  } catch (_) {
+    body = {};
   }
-  throw new Error(attempts.join(" | "));
+
+  if (!response.ok) {
+    throw new Error(
+      body?.message ||
+      body?.error ||
+      `Request failed with HTTP ${response.status}`
+    );
+  }
+
+  return body;
+}
+
+// Always read the current user's data from the server.
+// Never send/assume a user_id from the browser.
+async function getCurrentUser() {
+  const session = await apiCall("/session");
+  if (!session?.authenticated || !session?.user?.id) {
+    throw new Error("Not authenticated. Please log in again.");
+  }
+  return session.user;
+}
+
+async function getLiveFinancialContext() {
+  const result = {
+    user: null,
+    progress: null,
+    goals: [],
+    dashboard: null,
+  };
+
+  const user = await getCurrentUser();
+  result.user = user;
+
+  const userId = encodeURIComponent(user.id);
+
+  const [progressResult, goalsResult, dashboardResult] =
+    await Promise.allSettled([
+      apiCall(`/progress/summary?user_id=${userId}`),
+      apiCall(`/goals?user_id=${userId}`),
+      apiCall(`/dashboard?user_id=${userId}`),
+    ]);
+
+  if (progressResult.status === "fulfilled") {
+    result.progress = progressResult.value;
+  }
+
+  if (goalsResult.status === "fulfilled") {
+    const value = goalsResult.value;
+    result.goals = Array.isArray(value?.goals)
+      ? value.goals
+      : Array.isArray(value)
+      ? value
+      : [];
+  }
+
+  if (dashboardResult.status === "fulfilled") {
+    result.dashboard = dashboardResult.value;
+  }
+
+  return result;
+}
+
+function formatLiveContext(context) {
+  const goals = (context.goals || []).map((g) => ({
+    id: g.id,
+    name: g.goal_name ?? g.name,
+    target: Number(g.target_amount ?? 0),
+    saved: Number(g.current_saved ?? g.saved_amount ?? 0),
+    status: g.status,
+  }));
+
+  return {
+    user: context.user
+      ? {
+          id: context.user.id,
+          name: context.user.name,
+          email: context.user.email,
+        }
+      : null,
+    dashboard: context.dashboard,
+    progress: context.progress,
+    goals,
+  };
 }
 
 function levenshteinDistance(a, b) {
@@ -673,18 +734,35 @@ export default function AdvancedAlexaAssistant() {
         }
 
         if (intent.type === "GET_BRIEFING") {
-          const briefing =
-            lang === "hi"
-              ? "Shubh Prabhat Amit! Aaj aapka total wallet balance ₹1,75,151 hai. Is mahine aapka ₹10,199 kharcha hua hai, aur ₹1,85,350 credit hua hai. Aapka budget bilkul safe hai!"
-              : "Good morning Amit! Here is your daily Alexa briefing: Your net wallet balance stands at ₹1,75,151. You have spent ₹10,199 this month against deposits of ₹1,85,350.";
-          if (speakRef.current) speakRef.current(briefing);
+          try {
+            const context = await getLiveFinancialContext();
+            const progress = context.progress;
+
+            // The backend's progress endpoint is the source of truth.
+            if (progress?.narrative) {
+              if (speakRef.current) speakRef.current(progress.narrative);
+            } else {
+              const reply =
+                lang === "hi"
+                  ? "Mujhe aapka live financial summary mil gaya, lekin backend ne briefing text nahi bheja."
+                  : "I reached your live financial data, but the backend did not return a briefing.";
+              if (speakRef.current) speakRef.current(reply);
+            }
+          } catch (err) {
+            const reply =
+              lang === "hi"
+                ? "Live financial data load nahi ho pa raha. Please backend aur login session check karein."
+                : "I could not load your live financial data. Please check that the backend is running and you are logged in.";
+            console.warn("Live briefing error:", err);
+            if (speakRef.current) speakRef.current(reply);
+          }
           return;
         }
 
         if (intent.type === "ADD_GOAL_MONEY") {
           try {
-            const goalsRes = await apiCall("/goals?user_id=1");
-            const goals = Array.isArray(goalsRes.goals) ? goalsRes.goals : [];
+            const context = await getLiveFinancialContext();
+            const goals = context.goals || [];
             const match =
               goals.find((g) => g.goal_name.toLowerCase().includes(intent.goalQuery.toLowerCase())) ||
               goals.find((g) => intent.goalQuery.toLowerCase().includes(g.goal_name.toLowerCase()));
@@ -718,8 +796,8 @@ export default function AdvancedAlexaAssistant() {
           } catch (_) {
             const fallbackReply =
               lang === "hi"
-                ? `₹${intent.amount.toLocaleString("en-IN")} goal savings mein update kar diya gaya hai.`
-                : `Added ₹${intent.amount.toLocaleString("en-IN")} to your goal savings!`;
+                ? "Goal update nahi ho paaya. Main bina server confirmation ke amount add hua hai aisa nahi kahunga."
+                : "The goal update failed. I will not claim that money was added without server confirmation.";
             if (speakRef.current) speakRef.current(fallbackReply);
           }
           return;
@@ -727,8 +805,10 @@ export default function AdvancedAlexaAssistant() {
 
         if (intent.type === "GET_PROGRESS") {
           try {
-            const data = await apiCall("/progress/summary?user_id=1");
-            if (data.success && data.narrative) {
+            const context = await getLiveFinancialContext();
+            const data = context.progress;
+
+            if (data?.success && data?.narrative) {
               if (speakRef.current) speakRef.current(data.narrative);
             } else {
               const reply =
@@ -748,20 +828,68 @@ export default function AdvancedAlexaAssistant() {
         }
 
         if (intent.type === "GET_INVESTMENT_ADVICE") {
-          const reply =
-            lang === "hi"
-              ? "Main aapko UTI Nifty 50 Index Fund ya Parag Parikh Flexi Cap mein SIP shuru karne ki salah doonga. Yeh long term wealth ke liye sabse safe hain."
-              : "For long-term wealth creation, I recommend starting an SIP in a Nifty 50 Index Fund or Flexi-Cap Fund via our Groww store tab!";
-          if (speakRef.current) speakRef.current(reply);
+          try {
+            const context = await getLiveFinancialContext();
+            const liveContext = formatLiveContext(context);
+
+            const res = await apiCall("/chat", {
+              method: "POST",
+              body: JSON.stringify({
+                message: text,
+                conversation_history: [],
+                preferred_language: lang,
+                live_context: liveContext,
+              }),
+            });
+
+            const reply =
+              res.reply ||
+              res.response ||
+              res.narrative ||
+              "I could not generate a live investment response.";
+
+            if (speakRef.current) speakRef.current(reply);
+          } catch (err) {
+            console.warn("Live investment advice error:", err);
+            const reply =
+              lang === "hi"
+                ? "Aapke live financial data ke bina investment suggestion dena sahi nahi hoga. Pehle live data load karein."
+                : "I do not want to give a personalized investment suggestion without your live financial data.";
+            if (speakRef.current) speakRef.current(reply);
+          }
           return;
         }
 
         if (intent.type === "GET_CATEGORY_SPEND") {
-          const reply =
-            lang === "hi"
-              ? `Aapne "${intent.categoryQuery}" par is mahine lagbhag ₹2,450 kharcha kiya hai.`
-              : `You have spent approximately ₹2,450 on "${intent.categoryQuery}" this month.`;
-          if (speakRef.current) speakRef.current(reply);
+          try {
+            const context = await getLiveFinancialContext();
+
+            const res = await apiCall("/chat", {
+              method: "POST",
+              body: JSON.stringify({
+                user_id: context.user?.id,
+                message: text,
+                conversation_history: [],
+                preferred_language: lang,
+                live_context: formatLiveContext(context),
+              }),
+            });
+
+            const reply =
+              res.reply ||
+              res.response ||
+              res.narrative ||
+              `I could not calculate the live spending for ${intent.categoryQuery}.`;
+
+            if (speakRef.current) speakRef.current(reply);
+          } catch (err) {
+            console.warn("Live category spend error:", err);
+            const reply =
+              lang === "hi"
+                ? `Main "${intent.categoryQuery}" ka live kharcha abhi load nahi kar pa raha hoon.`
+                : `I could not load the live spending for "${intent.categoryQuery}".`;
+            if (speakRef.current) speakRef.current(reply);
+          }
           return;
         }
       }
@@ -773,13 +901,18 @@ export default function AdvancedAlexaAssistant() {
           message: h.text || h.message || "",
         }));
 
+        const liveContext = await getLiveFinancialContext();
+
         const res = await apiCall("/chat", {
           method: "POST",
           body: JSON.stringify({
-            user_id: 1,
+            // Compatibility for the current backend. The value comes from
+            // the authenticated Flask session, never from a hard-coded ID.
+            user_id: liveContext.user?.id,
             message: text,
             conversation_history: formattedHistory,
             preferred_language: lang,
+            live_context: formatLiveContext(liveContext),
           }),
         });
 
@@ -797,8 +930,8 @@ export default function AdvancedAlexaAssistant() {
         console.warn("API Error caught, firing fallback:", err.message);
         const offlineFallback =
           lang === "hi"
-            ? `Maine aapki baat samajh li hai: "${text}". Aapke paas kul ₹1,75,151 ka net savings balance maujood hai.`
-            : `I heard your query: "${text}". Your current wallet net savings balance is well maintained at ₹1,75,151.`;
+            ? `Maine aapki baat samajh li hai: "${text}". Live financial data abhi available nahi hai, isliye main koi amount guess nahi karunga.`
+            : `I heard your query: "${text}". Live financial data is currently unavailable, so I will not guess any financial amount.`;
 
         setLastAiReply(offlineFallback);
         if (speakRef.current) speakRef.current(offlineFallback);
@@ -969,10 +1102,9 @@ export default function AdvancedAlexaAssistant() {
       setState("idle");
     };
     rec.onend = () => {
-      if (state === "listening") {
-        stopMicAnalyzer();
-        setState("idle");
-      }
+      stopMicAnalyzer();
+      setLiveInterim("");
+      setState("idle");
     };
 
     rec.start();
@@ -1038,7 +1170,10 @@ export default function AdvancedAlexaAssistant() {
               )}
             </div>
             <div style={styles.hudSubtitle}>
-              {liveInterim || lastUserSpeech || lastAiReply || "Say 'Hey AmiVest', 'Alexa' or speak in Hindi / English…"}
+              {liveInterim ||
+                lastUserSpeech ||
+                lastAiReply ||
+                "Live data mode: dashboard + goals + transactions. Say 'Hey AmiVest' or tap to speak…"}
             </div>
           </div>
 

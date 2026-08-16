@@ -1,37 +1,79 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 
-const BASE_IP = "http://127.0.0.1:5000";
-const BASE_LOCAL = "http://localhost:5000";
+const API_BASE =
+  import.meta.env.VITE_BACKEND_URL?.trim() || "";
 
 async function apiCall(path, options = {}) {
-  const urls = [path, `${BASE_IP}${path}`, `${BASE_LOCAL}${path}`];
   const method = (options.method || "GET").toUpperCase();
-  const attempts = [];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
-        credentials: "include",
-        ...(method !== "GET" ? { headers: { "Content-Type": "application/json" } } : {}),
-        ...options,
-      });
-      let body = null;
-      let parseFailed = false;
-      try { body = await res.json(); } catch (_) { parseFailed = true; }
-      if (res.ok && !parseFailed) return body || {};
-      if (res.ok && parseFailed) { attempts.push(`${url} → HTTP ${res.status} but not JSON`); continue; }
-      attempts.push(`${url} → HTTP ${res.status}: ${(body && (body.error || body.message)) || "no details"}`);
-    } catch (err) {
-      attempts.push(`${url} → ${err.name}: ${err.message}`);
-    }
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    method,
+    credentials: "include",
+    headers: {
+      ...(method !== "GET" ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  });
+
+  let body = {};
+  try {
+    body = await response.json();
+  } catch (_) {}
+
+  if (!response.ok) {
+    throw new Error(
+      body?.error ||
+        body?.message ||
+        `Request failed with HTTP ${response.status}`
+    );
   }
-  throw new Error(attempts.join("  |  "));
+
+  return body;
 }
 
-const currency = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
-const card = { background: "#161a1f", border: "1px solid #242b35", borderRadius: "14px", padding: "22px" };
-const inputStyle = { width: "100%", background: "#0B1420", border: "1px solid #242b35", borderRadius: "8px", padding: "12px", color: "#fff", fontSize: "14px", outline: "none", boxSizing: "border-box" };
+const currency = (n) =>
+  `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+
+const card = {
+  background: "#161a1f",
+  border: "1px solid #242b35",
+  borderRadius: "14px",
+  padding: "22px",
+};
+
+const inputStyle = {
+  width: "100%",
+  background: "#0B1420",
+  border: "1px solid #242b35",
+  borderRadius: "8px",
+  padding: "12px",
+  color: "#fff",
+  fontSize: "14px",
+  outline: "none",
+  boxSizing: "border-box",
+};
+
 function pillStyle(active) {
-  return { background: active ? "#0D9488" : "#0B1420", border: `1px solid ${active ? "#0D9488" : "#242b35"}`, color: "#fff", padding: "14px 10px", borderRadius: "10px", fontSize: "13px", cursor: "pointer", textAlign: "center" };
+  return {
+    background: active ? "#0D9488" : "#0B1420",
+    border: `1px solid ${active ? "#0D9488" : "#242b35"}`,
+    color: "#fff",
+    padding: "14px 10px",
+    borderRadius: "10px",
+    fontSize: "13px",
+    cursor: "pointer",
+    textAlign: "center",
+  };
+}
+
+function emiFor(principal, annualRate, months) {
+  const p = Number(principal || 0);
+  const n = Number(months || 0);
+  const r = Number(annualRate || 0) / 12 / 100;
+  if (!p || !n) return 0;
+  if (!r) return p / n;
+  return (p * r * Math.pow(1 + r, n)) / (Math.pow(1 + r, n) - 1);
 }
 
 // ===================================================
@@ -166,6 +208,107 @@ function InterviewWizard({ onComplete }) {
             {saving ? "Analyzing…" : "Check My Eligibility"}
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+
+// ===================================================
+// Loan Command Center
+// Practical affordability + stress testing + repayment math.
+// This is planning support, not a lender approval decision.
+// ===================================================
+function LoanCommandCenter({ analysis, transactions = [] }) {
+  const [amount, setAmount] = useState(Number(analysis?.requested_amount || 200000));
+  const [rate, setRate] = useState(analysis?.assumed_rate_range ? 11 : 11);
+  const [months, setMonths] = useState(Number(analysis?.duration_years || 5) * 12 || 60);
+  const [shock, setShock] = useState(20);
+
+  const cashflow = useMemo(() => {
+    const income = transactions
+      .filter((t) => String(t.type || "").toLowerCase() === "income")
+      .reduce((s, t) => s + Number(t.amount || 0), 0);
+    const expense = transactions
+      .filter((t) => String(t.type || "").toLowerCase() === "expense")
+      .reduce((s, t) => s + Number(t.amount || 0), 0);
+    return { income, expense, surplus: income - expense };
+  }, [transactions]);
+
+  const baseEmi = emiFor(amount, rate, months);
+  const stressedEmi = emiFor(amount, rate + shock / 10, months);
+  const emiShare =
+    cashflow.income > 0 ? (baseEmi / cashflow.income) * 100 : null;
+  const stressedShare =
+    cashflow.income > 0 ? (stressedEmi / cashflow.income) * 100 : null;
+  const totalInterest = Math.max(0, baseEmi * months - amount);
+
+  const readiness =
+    emiShare == null
+      ? "Need income data"
+      : emiShare <= 25
+      ? "Comfortable range"
+      : emiShare <= 35
+      ? "Review carefully"
+      : "High repayment pressure";
+
+  return (
+    <div style={{ ...card, marginBottom: "22px" }}>
+      <div style={{ marginBottom: "16px" }}>
+        <div style={{ color: "#5eead4", fontSize: "11px", fontWeight: "800", letterSpacing: ".12em" }}>
+          FINSAATHI LOAN COMMAND CENTER
+        </div>
+        <h3 style={{ color: "#fff", margin: "6px 0 4px", fontSize: "20px" }}>
+          Test the loan before you apply
+        </h3>
+        <p style={{ color: "#94a3b8", fontSize: "12px", margin: 0 }}>
+          Adjust amount, rate and tenure to see EMI, interest cost and repayment pressure using your live transaction context.
+        </p>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: "12px" }}>
+        <div>
+          <label style={{ color: "#9ca3af", fontSize: "11px" }}>LOAN AMOUNT</label>
+          <input type="number" value={amount} onChange={(e) => setAmount(Number(e.target.value) || 0)} style={{ ...inputStyle, marginTop: "6px" }} />
+        </div>
+        <div>
+          <label style={{ color: "#9ca3af", fontSize: "11px" }}>RATE %</label>
+          <input type="number" step="0.1" value={rate} onChange={(e) => setRate(Number(e.target.value) || 0)} style={{ ...inputStyle, marginTop: "6px" }} />
+        </div>
+        <div>
+          <label style={{ color: "#9ca3af", fontSize: "11px" }}>TENURE (MONTHS)</label>
+          <input type="number" value={months} onChange={(e) => setMonths(Number(e.target.value) || 1)} style={{ ...inputStyle, marginTop: "6px" }} />
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: "10px", marginTop: "14px" }}>
+        {[
+          ["Monthly EMI", currency(baseEmi), "#10B981"],
+          ["Total interest", currency(totalInterest), "#F59E0B"],
+          ["Income share", emiShare == null ? "—" : `${emiShare.toFixed(1)}%`, emiShare != null && emiShare <= 35 ? "#10B981" : "#EF4444"],
+          ["Planning status", readiness, emiShare != null && emiShare <= 25 ? "#10B981" : "#F59E0B"],
+        ].map(([label, value, color]) => (
+          <div key={label} style={{ background: "#0B1420", border: "1px solid #242b35", borderRadius: "10px", padding: "13px" }}>
+            <div style={{ color: "#6b7280", fontSize: "10px" }}>{label.toUpperCase()}</div>
+            <div style={{ color, fontSize: "17px", fontWeight: "800", marginTop: "5px" }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: "16px", background: "#0B1420", borderRadius: "10px", padding: "14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", color: "#CBD5E1", fontSize: "12px", marginBottom: "8px" }}>
+          <span>Stress test: rate shock</span>
+          <strong>+{shock / 10}%</strong>
+        </div>
+        <input type="range" min="0" max="50" step="5" value={shock} onChange={(e) => setShock(Number(e.target.value))} style={{ width: "100%" }} />
+        <div style={{ color: "#94a3b8", fontSize: "11px", marginTop: "7px" }}>
+          Stress EMI: <b style={{ color: stressedEmi > baseEmi * 1.15 ? "#F59E0B" : "#10B981" }}>{currency(stressedEmi)}</b>
+          {stressedShare != null ? ` · ${stressedShare.toFixed(1)}% of detected income` : ""}
+        </div>
+      </div>
+
+      <div style={{ marginTop: "14px", color: "#64748b", fontSize: "11px", lineHeight: "1.6" }}>
+        ⚠️ These calculations are indicative. Actual lender rates, fees, insurance, eligibility and approval depend on the lender's current underwriting.
       </div>
     </div>
   );
@@ -395,11 +538,12 @@ function LoanTracker() {
 // ===================================================
 // Slideshow shell
 // ===================================================
-function ResultsSlideshow({ a, onRedoInterview }) {
+function ResultsSlideshow({ a, transactions = [], onRedoInterview }) {
   const [slide, setSlide] = useState(0);
   const slides = [
     { title: "Eligibility", content: <EligibilityCard a={a} /> },
     { title: "Recommendation", content: <RecommendationCard a={a} /> },
+    { title: "Loan Simulator", content: <LoanCommandCenter analysis={a} transactions={transactions} /> },
     { title: "Risk Score", content: <RiskCard a={a} /> },
     { title: "Compare Lenders", content: <LenderComparison a={a} /> },
     { title: "Documents", content: <DocumentsCard a={a} /> },
@@ -531,6 +675,33 @@ function FloatingLoanChat() {
   );
 }
 
+
+function LiveLoanSnapshot({ analysis, transactions = [] }) {
+  const income = transactions
+    .filter((t) => String(t.type || "").toLowerCase() === "income")
+    .reduce((s, t) => s + Number(t.amount || 0), 0);
+  const expense = transactions
+    .filter((t) => String(t.type || "").toLowerCase() === "expense")
+    .reduce((s, t) => s + Number(t.amount || 0), 0);
+  const surplus = income - expense;
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: "10px", marginBottom: "20px" }}>
+      {[
+        ["Live income", currency(income), "#10B981"],
+        ["Live expenses", currency(expense), "#F59E0B"],
+        ["Monthly surplus", currency(surplus), surplus >= 0 ? "#10B981" : "#EF4444"],
+        ["Requested", currency(analysis?.requested_amount), "#60A5FA"],
+      ].map(([label, value, color]) => (
+        <div key={label} style={{ background: "#0B1420", border: "1px solid #242b35", borderRadius: "11px", padding: "12px 14px" }}>
+          <div style={{ color: "#6b7280", fontSize: "10px", textTransform: "uppercase" }}>{label}</div>
+          <div style={{ color, fontSize: "16px", fontWeight: "800", marginTop: "5px" }}>{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ===================================================
 // Main page
 // ===================================================
@@ -593,7 +764,14 @@ export default function LoanAssistant({ transactions } = {}) {
       {!loading && !error && showInterview && <InterviewWizard onComplete={() => load()} />}
 
       {!loading && !error && !showInterview && analysisData && (
-        <ResultsSlideshow a={analysisData} onRedoInterview={() => setShowInterview(true)} />
+        <>
+          <LiveLoanSnapshot analysis={analysisData} transactions={transactions || []} />
+          <ResultsSlideshow
+            a={analysisData}
+            transactions={transactions || []}
+            onRedoInterview={() => setShowInterview(true)}
+          />
+        </>
       )}
 
       <FloatingLoanChat />

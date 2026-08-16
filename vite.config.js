@@ -15,87 +15,104 @@ export default defineConfig({
             "/chat": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/transactions": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/transaction": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/dashboard": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/upload": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/goals": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/investments": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/loans": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/payment": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/budget": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/user": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/tax": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/rbi": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/news": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/progress": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/test-ai": {
                 target: backend,
                 changeOrigin: true,
+                secure: false,
             },
 
             "/fraud": {
                 target: backend,
                 changeOrigin: true,
-            }
-        }
-    }
+                secure: false,
+            },
+        },
+    },
 });
