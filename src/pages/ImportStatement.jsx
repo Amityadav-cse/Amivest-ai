@@ -372,6 +372,10 @@ function ImportStatement({ setTransactions }) {
 
           <input
             type="password"
+            name="pdf-statement-password"
+            autoComplete="new-password"
+            data-lpignore="true"
+            data-1p-ignore="true"
             placeholder="Enter PDF password (optional)"
             value={password}
             onChange={(event) =>

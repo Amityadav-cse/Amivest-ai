@@ -334,7 +334,8 @@ function CreateGoalModal({ onClose, onCreated }) {
             <label style={labelStyle}>Goal name</label>
             <input
               value={form.goal_name}
-              onChange={(e) => update("goal_name", e.target.value)}
+              onChange={(e) =
+              autoComplete="off"> update("goal_name", e.target.value)}
               placeholder="e.g. Emergency Fund"
               style={inputStyle}
             />
@@ -374,7 +375,8 @@ function CreateGoalModal({ onClose, onCreated }) {
               <input
                 type="number"
                 value={form.target_amount}
-                onChange={(e) => update("target_amount", e.target.value)}
+                onChange={(e) =
+              autoComplete="off"> update("target_amount", e.target.value)}
                 placeholder="200000"
                 style={inputStyle}
               />
@@ -384,7 +386,8 @@ function CreateGoalModal({ onClose, onCreated }) {
               <input
                 type="date"
                 value={form.target_date}
-                onChange={(e) => update("target_date", e.target.value)}
+                onChange={(e) =
+              autoComplete="off"> update("target_date", e.target.value)}
                 style={inputStyle}
               />
             </div>
@@ -412,7 +415,8 @@ function CreateGoalModal({ onClose, onCreated }) {
             <input
               type="number"
               value={form.monthly_saving}
-              onChange={(e) => update("monthly_saving", e.target.value)}
+              onChange={(e) =
+              autoComplete="off"> update("monthly_saving", e.target.value)}
               placeholder="e.g. 8000"
               style={inputStyle}
             />
@@ -638,7 +642,8 @@ function GoalDetailModal({ goal, onClose, onUpdated, onDeleted }) {
               <input
                 type="number"
                 value={addAmount}
-                onChange={(e) => setAddAmount(e.target.value)}
+                onChange={(e) =
+              autoComplete="off"> setAddAmount(e.target.value)}
                 placeholder="Amount in ₹"
                 style={{ ...inputStyle, flex: 1 }}
               />
@@ -1074,7 +1079,8 @@ function GoalIntelligence({ goals, transactions = [] }) {
             max={Math.max(1000, Math.round(insight.safeExtra * 2))}
             step="500"
             value={extraMonthly}
-            onChange={(e) => setExtraMonthly(Number(e.target.value))}
+            onChange={(e) =
+              autoComplete="off"> setExtraMonthly(Number(e.target.value))}
             style={{ width: "100%" }}
           />
           <div style={{ display: "flex", justifyContent: "space-between", color: "#94a3b8", fontSize: "11px", marginTop: "5px" }}>
