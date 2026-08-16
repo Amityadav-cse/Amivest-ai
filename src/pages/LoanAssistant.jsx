@@ -147,7 +147,7 @@ function InterviewWizard({ onComplete }) {
             {AMOUNT_PRESETS.map((a) => <button key={a} onClick={() => { set("requested_amount", a); setCustomAmount(""); }} style={pillStyle(answers.requested_amount === a)}>{currency(a)}</button>)}
           </div>
           <input type="number" placeholder="Custom amount" value={customAmount}
-            onChange={(e) => { setCustomAmount(e.target.value); set("requested_amount", Number(e.target.value) || ""); }} style={inputStyle} />
+            onChange={(e) => { setCustomAmount(e.target.value); set("requested_amount", Number(e.target.value) || ""); }} autoComplete="off" style={inputStyle} />
         </>
       )}
 
@@ -173,10 +173,10 @@ function InterviewWizard({ onComplete }) {
         <>
           <h3 style={{ color: "#fff", marginTop: 0 }}>Existing EMI (₹/month)?</h3>
           <p style={{ color: "#9ca3af", fontSize: "13px", marginTop: 0 }}>Enter 0 if you don't have any ongoing loans.</p>
-          <input type="number" placeholder="0" value={answers.existing_emi} onChange={(e) => set("existing_emi", e.target.value)} style={inputStyle} />
+          <input type="number" placeholder="0" value={answers.existing_emi} onChange={(e) => set("existing_emi", e.target.value)} autoComplete="off" style={inputStyle} />
           <div style={{ marginTop: "16px" }}>
             <label style={{ display: "block", color: "#9ca3af", fontSize: "12px", marginBottom: "6px" }}>Credit score (optional)</label>
-            <input type="number" placeholder="e.g. 750" value={answers.credit_score} onChange={(e) => set("credit_score", e.target.value)} style={inputStyle} />
+            <input type="number" placeholder="e.g. 750" value={answers.credit_score} onChange={(e) => set("credit_score", e.target.value)} autoComplete="off" style={inputStyle} />
           </div>
         </>
       )}
@@ -269,15 +269,15 @@ function LoanCommandCenter({ analysis, transactions = [] }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: "12px" }}>
         <div>
           <label style={{ color: "#9ca3af", fontSize: "11px" }}>LOAN AMOUNT</label>
-          <input type="number" value={amount} onChange={(e) => setAmount(Number(e.target.value) || 0)} style={{ ...inputStyle, marginTop: "6px" }} />
+          <input type="number" value={amount} onChange={(e) => setAmount(Number(e.target.value) || 0)} autoComplete="off" style={{ ...inputStyle, marginTop: "6px" }} />
         </div>
         <div>
           <label style={{ color: "#9ca3af", fontSize: "11px" }}>RATE %</label>
-          <input type="number" step="0.1" value={rate} onChange={(e) => setRate(Number(e.target.value) || 0)} style={{ ...inputStyle, marginTop: "6px" }} />
+          <input type="number" step="0.1" value={rate} onChange={(e) => setRate(Number(e.target.value) || 0)} autoComplete="off" style={{ ...inputStyle, marginTop: "6px" }} />
         </div>
         <div>
           <label style={{ color: "#9ca3af", fontSize: "11px" }}>TENURE (MONTHS)</label>
-          <input type="number" value={months} onChange={(e) => setMonths(Number(e.target.value) || 1)} style={{ ...inputStyle, marginTop: "6px" }} />
+          <input type="number" value={months} onChange={(e) => setMonths(Number(e.target.value) || 1)} autoComplete="off" style={{ ...inputStyle, marginTop: "6px" }} />
         </div>
       </div>
 
@@ -495,11 +495,11 @@ function LoanTracker() {
 
       {showAdd && (
         <div style={{ background: "#0B1420", borderRadius: "10px", padding: "16px", marginBottom: "16px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-          <input placeholder="Lender name" value={form.lender} onChange={(e) => setForm({ ...form, lender: e.target.value })} style={inputStyle} />
-          <input type="number" placeholder="Principal (₹)" value={form.principal} onChange={(e) => setForm({ ...form, principal: e.target.value })} style={inputStyle} />
-          <input type="number" step="0.1" placeholder="Annual rate (%)" value={form.annual_rate} onChange={(e) => setForm({ ...form, annual_rate: e.target.value })} style={inputStyle} />
-          <input type="number" placeholder="Tenure (months)" value={form.tenure_months} onChange={(e) => setForm({ ...form, tenure_months: e.target.value })} style={inputStyle} />
-          <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} style={inputStyle} />
+          <input placeholder="Lender name" value={form.lender} onChange={(e) => setForm({ ...form, lender: e.target.value })} autoComplete="off" style={inputStyle} />
+          <input type="number" placeholder="Principal (₹)" value={form.principal} onChange={(e) => setForm({ ...form, principal: e.target.value })} autoComplete="off" style={inputStyle} />
+          <input type="number" step="0.1" placeholder="Annual rate (%)" value={form.annual_rate} onChange={(e) => setForm({ ...form, annual_rate: e.target.value })} autoComplete="off" style={inputStyle} />
+          <input type="number" placeholder="Tenure (months)" value={form.tenure_months} onChange={(e) => setForm({ ...form, tenure_months: e.target.value })} autoComplete="off" style={inputStyle} />
+          <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} autoComplete="off" style={inputStyle} />
           <button onClick={addLoan} disabled={saving} style={{ background: "#0D9488", border: "none", color: "#fff", borderRadius: "8px", fontWeight: "700", cursor: "pointer" }}>
             {saving ? "Saving…" : "Save"}
           </button>
