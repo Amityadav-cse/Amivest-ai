@@ -2,9 +2,11 @@ import { useState, useEffect, useRef } from "react";
 
 // ==========================================
 // SYSTEM CONFIGURATION
-// Configured to utilize relative proxy routing.
+// Local: Vite proxy -> http://127.0.0.1:5000
+// Production: Vercel /api -> Render backend
 // ==========================================
-const BACKEND_PORT = "5000"; 
+const BACKEND_PORT = "5000";
+const API_BASE = import.meta.env.PROD ? "/api" : ""; 
 
 /**
  * Clean and convert raw currency strings (e.g. "₹106,198.00" or "15,000") 
@@ -90,7 +92,7 @@ function ChatBot({
     setSyncStatus("syncing");
     
     try {
-      const response = await fetch("/transactions", { method: "GET" });
+      const response = await fetch(`${API_BASE}/transactions`, { method: "GET", credentials: "include" });
       if (response.ok) {
         const data = await response.json();
         let fetchedList = [];
@@ -145,11 +147,21 @@ function ChatBot({
     return null;
   };
 
-  // Load saved conversation using the relative Vite proxy path
+  // Get the currently logged-in user's ID.
+  const getCurrentUserId = () => {
+    try {
+      const user = JSON.parse(localStorage.getItem("user") || "null");
+      return user?.id || user?.user_id || 1;
+    } catch (_) {
+      return 1;
+    }
+  };
+
+  // Load saved conversation using the local Vite proxy or production /api proxy.
   useEffect(() => {
     const loadHistory = async () => {
       try {
-        const res = await fetch("/chat/history?user_id=1");
+        const res = await fetch(`${API_BASE}/chat/history?user_id=${getCurrentUserId()}`, { credentials: "include" });
         if (res.ok) {
           const data = await res.json();
           if (data.success && Array.isArray(data.messages) && data.messages.length > 0) {
@@ -250,7 +262,7 @@ function ChatBot({
     const promptWithDashboardContext = `[SYSTEM CONTEXT: The user's active dashboard displays these exact values: Total Deposits (Income) = ₹${totalIncome.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, Total Outflows (Expenses) = ₹${totalExpenses.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}, and Net Wallet Savings (Surplus) = ₹${netSavings.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. There are currently ${localTransactions.length} transactions loaded. You MUST use these exact numbers to answer any questions about the user's balance, income, or expenses. Do not hallucinate or state other metrics.]\n\nUser Question: ${question}`;
 
     const payloadContext = {
-      user_id: 1,
+      user_id: getCurrentUserId(),
       message: promptWithDashboardContext,
       conversation_history: messages.map((m) => ({
         role: m.who === "user" ? "user" : "assistant",
@@ -272,8 +284,9 @@ function ChatBot({
     };
 
     try {
-      const response = await fetch("/chat", {
+      const response = await fetch(`${API_BASE}/chat`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payloadContext),
       });
@@ -372,7 +385,7 @@ function ChatBot({
                   FinSaathi AI
                 </div>
                 <div style={{ color: "#10B981", fontSize: "12px", marginTop: "2px" }}>
-                  ● Connected to Port {BACKEND_PORT}
+                  ● Connected to {import.meta.env.PROD ? "Production API" : `Port ${BACKEND_PORT}`}
                 </div>
               </div>
             </div>
@@ -576,7 +589,7 @@ function ChatBot({
           </div>
 
           <div style={{ borderTop: "1px solid #1E3A5F", paddingTop: "14px", color: "#64748B", fontSize: "11px", textAlign: "center" }}>
-            amivest AI • Listening on Port {BACKEND_PORT}
+            amivest AI • {import.meta.env.PROD ? "Production API" : `Listening on Port ${BACKEND_PORT}`}
           </div>
         </div>
       </div>
