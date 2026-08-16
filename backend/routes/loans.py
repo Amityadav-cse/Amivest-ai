@@ -1,10 +1,26 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, session
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from services.gemini_service import ask_financial_ai
 from database.db import get_connection
 
 loans = Blueprint("loans", __name__)
+
+def _current_user_id():
+    """Return the authenticated user's ID from the Flask session."""
+    user_id = session.get("user_id")
+    try:
+        return int(user_id) if user_id is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _require_user():
+    user_id = _current_user_id()
+    if user_id is None:
+        return None, (jsonify({"success": False, "error": "Authentication required. Please log in again."}), 401)
+    return user_id, None
+
 
 
 # ===================================================
@@ -13,7 +29,9 @@ loans = Blueprint("loans", __name__)
 @loans.route("/loans/profile", methods=["GET"])
 def get_profile():
     try:
-        user_id = request.args.get("user_id", 1)
+        user_id, auth_error = _require_user()
+        if auth_error:
+            return auth_error
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM loan_profile WHERE user_id = %s", (user_id,))
@@ -38,8 +56,10 @@ def get_profile():
 @loans.route("/loans/profile", methods=["POST"])
 def save_profile():
     try:
-        data = request.json
-        user_id = data.get("user_id", 1)
+        data = request.json or {}
+        user_id, auth_error = _require_user()
+        if auth_error:
+            return auth_error
 
         conn = get_connection()
         cursor = conn.cursor()
@@ -117,7 +137,9 @@ def _max_principal_for_emi(emi_capacity, annual_rate_pct, months):
 @loans.route("/loans/analysis", methods=["GET"])
 def analysis():
     try:
-        user_id = request.args.get("user_id", 1)
+        user_id, auth_error = _require_user()
+        if auth_error:
+            return auth_error
 
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
@@ -277,7 +299,9 @@ Existing debt-to-income ratio: {existing_dti:.0f}%"""
 @loans.route("/loans/track", methods=["GET"])
 def list_tracked_loans():
     try:
-        user_id = request.args.get("user_id", 1)
+        user_id, auth_error = _require_user()
+        if auth_error:
+            return auth_error
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute("SELECT * FROM loan_tracker WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
@@ -331,8 +355,10 @@ def list_tracked_loans():
 @loans.route("/loans/track", methods=["POST"])
 def add_tracked_loan():
     try:
-        data = request.json
-        user_id = data.get("user_id", 1)
+        data = request.json or {}
+        user_id, auth_error = _require_user()
+        if auth_error:
+            return auth_error
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
@@ -358,9 +384,13 @@ def add_tracked_loan():
 @loans.route("/loans/track/<int:loan_id>", methods=["DELETE"])
 def delete_tracked_loan(loan_id):
     try:
+        user_id, auth_error = _require_user()
+        if auth_error:
+            return auth_error
+
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM loan_tracker WHERE id = %s", (loan_id,))
+        cursor.execute("DELETE FROM loan_tracker WHERE id = %s AND user_id = %s", (loan_id, user_id))
         conn.commit()
         cursor.close()
         conn.close()

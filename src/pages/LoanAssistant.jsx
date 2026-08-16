@@ -10,6 +10,7 @@ async function apiCall(path, options = {}) {
   for (const url of urls) {
     try {
       const res = await fetch(url, {
+        credentials: "include",
         ...(method !== "GET" ? { headers: { "Content-Type": "application/json" } } : {}),
         ...options,
       });
@@ -70,7 +71,7 @@ function InterviewWizard({ onComplete }) {
     setSaving(true);
     setError("");
     try {
-      const data = await apiCall("/loans/profile", { method: "POST", body: JSON.stringify({ user_id: 1, ...answers }) });
+      const data = await apiCall("/loans/profile", { method: "POST", body: JSON.stringify({ ...answers }) });
       if (data.success) onComplete();
       else setError(data.error || "Could not save your answers.");
     } catch (err) {
@@ -312,7 +313,7 @@ function LoanTracker() {
   const load = async () => {
     setLoading(true);
     try {
-      const data = await apiCall("/loans/track?user_id=1", { method: "GET" });
+      const data = await apiCall("/loans/track", { method: "GET" });
       if (data.success) setLoans(data.loans);
     } catch (_) {
       // non-fatal, tracker is optional
@@ -326,7 +327,7 @@ function LoanTracker() {
   const addLoan = async () => {
     setSaving(true);
     try {
-      await apiCall("/loans/track", { method: "POST", body: JSON.stringify({ user_id: 1, ...form }) });
+      await apiCall("/loans/track", { method: "POST", body: JSON.stringify({ ...form }) });
       setShowAdd(false);
       setForm({ lender: "", principal: "", annual_rate: "", tenure_months: "", start_date: "" });
       load();
@@ -464,7 +465,7 @@ function FloatingLoanChat() {
     try {
       const data = await apiCall("/chat", {
         method: "POST",
-        body: JSON.stringify({ user_id: 1, message: question }),
+        body: JSON.stringify({ message: question }),
       });
       const reply = data.reply || data.response || "No response received.";
       setMessages((prev) => [...prev, { who: "ai", text: reply }]);
@@ -543,7 +544,7 @@ export default function LoanAssistant({ transactions } = {}) {
     if (!silent) setLoading(true);
     setError("");
     try {
-      const data = await apiCall("/loans/analysis?user_id=1", { method: "GET" });
+      const data = await apiCall("/loans/analysis", { method: "GET" });
       if (!data.success) setError(data.error || "Could not load your analysis.");
       else if (!data.profile_complete) setShowInterview(true);
       else { setAnalysisData(data); setShowInterview(false); }

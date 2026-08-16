@@ -5,19 +5,11 @@ from pathlib import Path
 import os
 
 
-# =====================================================
-# ENVIRONMENT
-# =====================================================
-
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-
-# =====================================================
-# APP
-# =====================================================
 
 app = Flask(__name__)
 
@@ -33,11 +25,18 @@ app.config["SECRET_KEY"] = os.getenv(
 
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 
-# HTTPS is used on Render/Vercel
-app.config["SESSION_COOKIE_SECURE"] = True
+SESSION_COOKIE_SECURE = os.getenv(
+    "SESSION_COOKIE_SECURE",
+    "true" if os.getenv("RENDER") or os.getenv("FLASK_ENV") == "production" else "false"
+).lower() == "true"
 
-# Needed for frontend -> backend requests
-app.config["SESSION_COOKIE_SAMESITE"] = "None"
+app.config["SESSION_COOKIE_SECURE"] = SESSION_COOKIE_SECURE
+
+app.config["SESSION_COOKIE_SAMESITE"] = (
+    "None" if SESSION_COOKIE_SECURE else "Lax"
+)
+
+app.config["SESSION_COOKIE_PATH"] = "/"
 
 
 # =====================================================
@@ -49,10 +48,8 @@ CORS(
     resources={
         r"/*": {
             "origins": [
-                # Vercel production
                 "https://amivest-ai-iota.vercel.app",
 
-                # Local development
                 "http://127.0.0.1:5173",
                 "http://127.0.0.1:5174",
                 "http://localhost:5173",
@@ -118,7 +115,6 @@ app.register_blueprint(transaction)
 
 @app.route("/")
 def home():
-
     return jsonify({
         "success": True,
         "name": "Amivest AI",
@@ -132,7 +128,6 @@ def home():
 
 @app.route("/health")
 def health():
-
     return jsonify({
         "success": True,
         "status": "healthy"
@@ -145,7 +140,6 @@ def health():
 
 @app.errorhandler(404)
 def not_found(error):
-
     return jsonify({
         "success": False,
         "error": "Not Found",
@@ -155,7 +149,6 @@ def not_found(error):
 
 @app.errorhandler(500)
 def server_error(error):
-
     return jsonify({
         "success": False,
         "error": "Internal Server Error",
@@ -168,7 +161,6 @@ def server_error(error):
 # =====================================================
 
 if __name__ == "__main__":
-
     app.run(
         host="127.0.0.1",
         port=5000,

@@ -30,6 +30,7 @@ async function apiCall(path, options = {}) {
   for (const url of urls) {
     try {
       const res = await fetch(url, {
+        credentials: "include",
         ...(method !== "GET" ? { headers: { "Content-Type": "application/json" } } : {}),
         ...options,
       });
@@ -256,7 +257,6 @@ function CreateGoalModal({ onClose, onCreated }) {
       const data = await apiCall("/goals/suggest-plan", {
         method: "POST",
         body: JSON.stringify({
-          user_id: 1,
           goal_name: form.goal_name,
           category: form.category,
           target_amount: Number(form.target_amount),
@@ -284,7 +284,6 @@ function CreateGoalModal({ onClose, onCreated }) {
       const data = await apiCall("/goals", {
         method: "POST",
         body: JSON.stringify({
-          user_id: 1,
           goal_name: form.goal_name,
           category: form.category,
           target_amount: Number(form.target_amount),
@@ -723,7 +722,7 @@ function SummaryStats({ refreshKey }) {
 
   useEffect(() => {
     let cancelled = false;
-    apiCall("/goals/summary?user_id=1", { method: "GET" })
+    apiCall("/goals/summary", { method: "GET" })
       .then((data) => {
         if (!cancelled && data.success) setSummary(data);
       })
@@ -763,7 +762,7 @@ function SuggestionBanner({ onApplied, refreshKey }) {
 
   useEffect(() => {
     let cancelled = false;
-    apiCall("/goals/suggest-allocation?user_id=1", { method: "GET" })
+    apiCall("/goals/suggest-allocation", { method: "GET" })
       .then((data) => {
         if (cancelled) return;
         if (data.success && data.suggestions && data.suggestions.length > 0) {
@@ -897,7 +896,7 @@ export default function Goals({ transactions } = {}) {
     setLoading(true);
     setError("");
     try {
-      const data = await apiCall("/goals?user_id=1", { method: "GET" });
+      const data = await apiCall("/goals", { method: "GET" });
       setGoals(Array.isArray(data.goals) ? data.goals : []);
     } catch (err) {
       setError(err.message || "Could not load your goals.");
