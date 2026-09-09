@@ -30,7 +30,6 @@ import ImportStatement from "./pages/ImportStatement";
 import Chat from "./pages/Chat";
 import Premium from "./pages/Premium";
 import RentHome from "./pages/RentHome";
-import BusinessAdvisor from "./pages/BusinessAdvisor";
 
 /*
 ===========================================================
@@ -1683,7 +1682,7 @@ function App() {
         <Route path="/rent/owner" element={<RentOwnerPage />} />
 
         {/* AMIBUSINESS */}
-        <Route path="/business" element={<BusinessAdvisor />} />
+        <Route path="/business" element={<BusinessAdvisorPage />} />
 
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

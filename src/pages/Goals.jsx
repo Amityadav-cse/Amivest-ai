@@ -1,1028 +1,1819 @@
-import { useState, useEffect } from "react";
-import BudgetLimits from "./BudgetLimits"; // CHANGED: added
+import React, { useEffect, useMemo, useState } from "react";
 
-// ==========================================
-// CONFIG
-// ==========================================
-const API_URL = (
-  import.meta.env.VITE_API_URL || "/api"
-).replace(/\/$/, "");
+/*
+ * ============================================================
+ * AMIVEST AI - GOALS / DAILY EXPENSE / SPENDING LIMITS
+ * ============================================================
+ *
+ * This page is intentionally independent:
+ * - If the user has NO spending limits, the page still works.
+ * - Adding an expense does NOT require a spending limit.
+ * - A warning is shown when a matching limit reaches 80%.
+ * - An alert is shown when a matching limit is exceeded.
+ * - API failures for optional budget endpoints do not break the page.
+ *
+ * Expected backend endpoints:
+ *   GET    /budget/categories
+ *   GET    /budget/limits
+ *   GET    /budget/expenses/today
+ *   GET    /budget/summary
+ *   POST   /budget/limits
+ *   DELETE /budget/limits/:id
+ *   POST   /budget/expense
+ */
 
-const CATEGORIES = [
-  { key: "Emergency Fund", icon: "🛟", color: "#EF4444" },
-  { key: "Buy Car", icon: "🚗", color: "#3B82F6" },
-  { key: "Buy House", icon: "🏠", color: "#F59E0B" },
-  { key: "Education", icon: "🎓", color: "#8B5CF6" },
-  { key: "Vacation", icon: "🏖️", color: "#0EA5E9" },
-  { key: "Retirement", icon: "🌴", color: "#10B981" },
+const API_BASE =
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:5000";
+
+const DEFAULT_CATEGORIES = [
+  "Food",
+  "Shopping",
+  "Transport",
+  "Bills",
+  "Entertainment",
+  "Education",
+  "Health",
+  "Rent",
+  "Travel",
+  "Groceries",
+  "Subscriptions",
+  "Fuel",
+  "EMI",
+  "Investment",
+  "Other",
 ];
 
-const categoryMeta = (key) => CATEGORIES.find((c) => c.key === key) || { icon: "🎯", color: "#0D9488" };
+function money(value) {
+  const number = Number(value || 0);
+  return `₹${number.toLocaleString("en-IN", {
+    maximumFractionDigits: 2,
+  })}`;
+}
 
-const currency = (n) =>
-  `₹${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+function today() {
+  return new Date().toISOString().split("T")[0];
+}
 
-async function apiCall(path, options = {}) {
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    credentials: "include",
-    headers: {
-      ...(options.method && options.method.toUpperCase() !== "GET"
-        ? { "Content-Type": "application/json" }
-        : {}),
-      ...(options.headers || {}),
-    },
-  });
+function normalizeCategory(value) {
+  return String(value || "").trim().toLowerCase();
+}
 
-  let data = null;
-  try {
-    data = await response.json();
-  } catch (_) {
-    throw new Error(`Server returned HTTP ${response.status} with an invalid response.`);
+function getSpentFromLimit(limit) {
+  return Number(
+    limit?.spent ??
+      limit?.current_spending ??
+      limit?.amount_spent ??
+      0
+  );
+}
+
+function getLimitAmount(limit) {
+  return Number(
+    limit?.monthly_limit ??
+      limit?.limit ??
+      limit?.amount ??
+      0
+  );
+}
+
+function calculateLimitState(spent, limitAmount) {
+  const spentNumber = Number(spent || 0);
+  const limitNumber = Number(limitAmount || 0);
+
+  if (limitNumber <= 0) {
+    return {
+      percentage: 0,
+      remaining: 0,
+      status: "none",
+      exceededBy: 0,
+    };
   }
 
-  if (!response.ok) {
-    throw new Error(
-      data?.error ||
-      data?.message ||
-      `Request failed with HTTP ${response.status}.`
-    );
+  const rawPercentage = (spentNumber / limitNumber) * 100;
+  const remaining = Math.max(limitNumber - spentNumber, 0);
+  const exceededBy = Math.max(spentNumber - limitNumber, 0);
+
+  let status = "within";
+
+  if (spentNumber >= limitNumber) {
+    status = "exceeded";
+  } else if (rawPercentage >= 80) {
+    status = "warning";
   }
 
-  return data || {};
+  return {
+    percentage: rawPercentage,
+    remaining,
+    status,
+    exceededBy,
+  };
 }
 
-function downloadCertificate(goal) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 1000;
-  canvas.height = 700;
-  const ctx = canvas.getContext("2d");
+export default function Goals({ transactions = [] }) {
+  // ==========================================================
+  // DATA
+  // ==========================================================
 
-  const bg = ctx.createLinearGradient(0, 0, 1000, 700);
-  bg.addColorStop(0, "#0D2D4A");
-  bg.addColorStop(1, "#071829");
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, 1000, 700);
-
-  ctx.strokeStyle = "#0D9488";
-  ctx.lineWidth = 6;
-  ctx.strokeRect(30, 30, 940, 640);
-  ctx.strokeStyle = "#10B981";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(46, 46, 908, 608);
-
-  ctx.textAlign = "center";
-
-  ctx.fillStyle = "#0D9488";
-  ctx.font = "bold 22px Georgia";
-  ctx.fillText("F I N S A A T H I   A I", 500, 130);
-
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "bold 44px Georgia";
-  ctx.fillText("Certificate of Achievement", 500, 210);
-
-  ctx.fillStyle = "#9ca3af";
-  ctx.font = "18px Georgia";
-  ctx.fillText("This certifies that the goal below has been successfully completed", 500, 260);
-
-  ctx.fillStyle = "#10B981";
-  ctx.font = "bold 40px Georgia";
-  ctx.fillText(goal.goal_name, 500, 350);
-
-  ctx.fillStyle = "#ffffff";
-  ctx.font = "26px Georgia";
-  ctx.fillText(`₹${Number(goal.target_amount).toLocaleString("en-IN")} saved`, 500, 400);
-
-  ctx.fillStyle = "#9ca3af";
-  ctx.font = "16px Georgia";
-  ctx.fillText(goal.category, 500, 435);
-
-  ctx.fillStyle = "#6b7280";
-  ctx.font = "15px Georgia";
-  ctx.fillText(`Achieved on ${new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}`, 500, 560);
-
-  ctx.font = "40px Georgia";
-  ctx.fillText("🏆", 500, 620);
-
-  canvas.toBlob((blob) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${goal.goal_name.replace(/\s+/g, "_")}_certificate.png`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const [limits, setLimits] = useState([]);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [todayExpenses, setTodayExpenses] = useState([]);
+  const [monthlySummary, setMonthlySummary] = useState({
+    total: 0,
+    categories: [],
   });
-}
 
-function ProgressBar({ percent, color }) {
-  const clamped = Math.min(100, Math.max(0, percent));
-  return (
-    <div style={{ background: "#0B1420", borderRadius: "999px", height: "10px", overflow: "hidden" }}>
-      <div
-        style={{
-          width: `${clamped}%`,
-          height: "100%",
-          background: clamped >= 100 ? "#10B981" : color,
-          borderRadius: "999px",
-          transition: "width 0.4s ease",
-        }}
-      />
-    </div>
-  );
-}
+  // ==========================================================
+  // UI STATE
+  // ==========================================================
 
-function EmptyState({ onCreate }) {
-  return (
-    <div
-      style={{
-        background: "#161a1f",
-        border: "1px solid #242b35",
-        borderRadius: "16px",
-        padding: "60px 30px",
-        textAlign: "center",
-      }}
-    >
-      <div style={{ fontSize: "40px", marginBottom: "12px" }}>🎯</div>
-      <h3 style={{ color: "#fff", margin: "0 0 8px 0" }}>No goals yet</h3>
-      <p style={{ color: "#9ca3af", margin: "0 0 22px 0", fontSize: "14px" }}>
-        Set a target — emergency fund, a car, a trip — and FinSaathi AI will work out how much to save each month.
-      </p>
-      <button
-        onClick={onCreate}
-        style={{
-          background: "#0D9488",
-          color: "#fff",
-          border: "none",
-          padding: "12px 24px",
-          borderRadius: "8px",
-          fontWeight: "600",
-          fontSize: "14px",
-          cursor: "pointer",
-        }}
-      >
-        + Create Goal
-      </button>
-    </div>
-  );
-}
-
-function GoalCard({ goal, onOpen }) {
-  const meta = categoryMeta(goal.category);
-  const percent = goal.target_amount > 0 ? (goal.current_saved / goal.target_amount) * 100 : 0;
-  const isComplete = percent >= 100;
-
-  return (
-    <div
-      onClick={() => onOpen(goal)}
-      style={{
-        background: "#161a1f",
-        border: `1px solid ${isComplete ? "#10B981" : "#242b35"}`,
-        borderRadius: "14px",
-        padding: "20px",
-        cursor: "pointer",
-        transition: "transform 0.15s ease, border-color 0.15s ease",
-      }}
-      onMouseEnter={(e) => (e.currentTarget.style.transform = "translateY(-2px)")}
-      onMouseLeave={(e) => (e.currentTarget.style.transform = "translateY(0)")}
-    >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "14px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-          <div
-            style={{
-              width: "38px",
-              height: "38px",
-              borderRadius: "10px",
-              background: `${meta.color}22`,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: "18px",
-            }}
-          >
-            {meta.icon}
-          </div>
-          <div>
-            <div style={{ color: "#fff", fontWeight: "600", fontSize: "15px" }}>{goal.goal_name}</div>
-            <div style={{ color: "#9ca3af", fontSize: "12px" }}>{goal.category}</div>
-          </div>
-        </div>
-        {isComplete && <span style={{ fontSize: "20px" }}>🎉</span>}
-      </div>
-
-      <ProgressBar percent={percent} color={meta.color} />
-
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px", fontSize: "13px" }}>
-        <span style={{ color: "#10B981", fontWeight: "600" }}>{currency(goal.current_saved)} saved</span>
-        <span style={{ color: "#9ca3af" }}>of {currency(goal.target_amount)}</span>
-      </div>
-
-      <div style={{ marginTop: "10px", fontSize: "11px", color: "#6b7280" }}>
-        {isComplete ? "Goal completed" : `Target: ${goal.target_date || "No date set"}`}
-      </div>
-    </div>
-  );
-}
-
-function CreateGoalModal({ onClose, onCreated }) {
-  const [step, setStep] = useState(1);
-  const [form, setForm] = useState({
-    goal_name: "",
-    category: CATEGORIES[0].key,
-    target_amount: "",
-    target_date: "",
-    monthly_saving: "",
-  });
-  const [suggesting, setSuggesting] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  const update = (field, value) => setForm((prev) => ({ ...prev, [field]: value }));
-
-  const suggestMonthlySaving = async () => {
-    if (!form.target_amount || !form.target_date) return;
-    setSuggesting(true);
-    setError("");
-    try {
-      const data = await apiCall("/goals/suggest-plan", {
-        method: "POST",
-        body: JSON.stringify({
-          goal_name: form.goal_name,
-          category: form.category,
-          target_amount: Number(form.target_amount),
-          target_date: form.target_date,
-        }),
-      });
-      if (data.success && data.monthly_saving) {
-        update("monthly_saving", data.monthly_saving);
-      }
-    } catch (err) {
-      console.warn("AI suggestion unavailable:", err.message);
-    } finally {
-      setSuggesting(false);
-    }
-  };
-
-  const handleCreate = async () => {
-    if (!form.goal_name || !form.target_amount || !form.target_date) {
-      setError("Fill in the goal name, target amount, and target date.");
-      return;
-    }
-    setSaving(true);
-    setError("");
-    try {
-      const data = await apiCall("/goals", {
-        method: "POST",
-        body: JSON.stringify({
-          goal_name: form.goal_name,
-          category: form.category,
-          target_amount: Number(form.target_amount),
-          target_date: form.target_date,
-          monthly_saving: Number(form.monthly_saving) || 0,
-        }),
-      });
-      if (data.success) {
-        onCreated();
-      } else {
-        setError(data.error || "Could not save the goal. Try again.");
-      }
-    } catch (err) {
-      setError(err.message || "Could not reach the backend.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-        padding: "20px",
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "#161a1f",
-          border: "1px solid #242b35",
-          borderRadius: "16px",
-          padding: "28px",
-          width: "100%",
-          maxWidth: "440px",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "22px" }}>
-          <h3 style={{ color: "#fff", margin: 0 }}>Create a goal</h3>
-          <button
-            onClick={onClose}
-            style={{ background: "none", border: "none", color: "#9ca3af", fontSize: "18px", cursor: "pointer" }}
-          >
-            ✕
-          </button>
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          <div>
-            <label style={labelStyle}>Goal name</label>
-            <input
-              value={form.goal_name}
-              onChange={(e) => update("goal_name", e.target.value)}
-              placeholder="e.g. Emergency Fund"
-              style={inputStyle}
-            />
-          </div>
-
-          <div>
-            <label style={labelStyle}>Category</label>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px" }}>
-              {CATEGORIES.map((c) => (
-                <button
-                  key={c.key}
-                  onClick={() => update("category", c.key)}
-                  style={{
-                    background: form.category === c.key ? `${c.color}22` : "#0B1420",
-                    border: `1px solid ${form.category === c.key ? c.color : "#242b35"}`,
-                    borderRadius: "8px",
-                    padding: "10px 6px",
-                    color: "#fff",
-                    fontSize: "11px",
-                    cursor: "pointer",
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    gap: "4px",
-                  }}
-                >
-                  <span style={{ fontSize: "16px" }}>{c.icon}</span>
-                  {c.key}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-            <div>
-              <label style={labelStyle}>Target amount (₹)</label>
-              <input
-                type="number"
-                value={form.target_amount}
-                onChange={(e) => update("target_amount", e.target.value)}
-                placeholder="200000"
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={labelStyle}>Target date</label>
-              <input
-                type="date"
-                value={form.target_date}
-                onChange={(e) => update("target_date", e.target.value)}
-                style={inputStyle}
-              />
-            </div>
-          </div>
-
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <label style={labelStyle}>Monthly saving plan (₹)</label>
-              <button
-                onClick={suggestMonthlySaving}
-                disabled={suggesting || !form.target_amount || !form.target_date}
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: "#0D9488",
-                  fontSize: "12px",
-                  cursor: "pointer",
-                  fontWeight: "600",
-                  opacity: !form.target_amount || !form.target_date ? 0.5 : 1,
-                }}
-              >
-                {suggesting ? "Calculating…" : "✨ Ask AI"}
-              </button>
-            </div>
-            <input
-              type="number"
-              value={form.monthly_saving}
-              onChange={(e) => update("monthly_saving", e.target.value)}
-              placeholder="e.g. 8000"
-              style={inputStyle}
-            />
-          </div>
-
-          {error && <div style={{ color: "#EF4444", fontSize: "13px" }}>{error}</div>}
-
-          <button
-            onClick={handleCreate}
-            disabled={saving}
-            style={{
-              background: "#0D9488",
-              color: "#fff",
-              border: "none",
-              padding: "13px",
-              borderRadius: "8px",
-              fontWeight: "700",
-              fontSize: "14px",
-              cursor: "pointer",
-              marginTop: "6px",
-              opacity: saving ? 0.7 : 1,
-            }}
-          >
-            {saving ? "Saving…" : "Create Goal"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GoalDetailModal({ goal, onClose, onUpdated, onDeleted }) {
-  const meta = categoryMeta(goal.category);
-  const percent = goal.target_amount > 0 ? (goal.current_saved / goal.target_amount) * 100 : 0;
-  const isComplete = percent >= 100;
-
-  const [addAmount, setAddAmount] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [tips, setTips] = useState("");
-  const [loadingTips, setLoadingTips] = useState(false);
-  const [error, setError] = useState("");
-
-  const deleteGoal = async () => {
-    if (!window.confirm(`Delete "${goal.goal_name}"? This can't be undone.`)) return;
-    setDeleting(true);
-    try {
-      const data = await apiCall(`/goals/${goal.id}`, { method: "DELETE" });
-      if (data.success) {
-        onDeleted();
-        onClose();
-      } else {
-        setError(data.error || "Could not delete the goal.");
-      }
-    } catch (err) {
-      setError(err.message || "Could not reach the backend.");
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  const addMoney = async () => {
-    const amount = Number(addAmount);
-    if (!amount || amount <= 0) return;
-    setSaving(true);
-    setError("");
-    try {
-      const data = await apiCall(`/goals/${goal.id}/add-money`, {
-        method: "POST",
-        body: JSON.stringify({ amount }),
-      });
-      if (data.success) {
-        setAddAmount("");
-        onUpdated();
-      } else {
-        setError(data.error || "Could not update the goal.");
-      }
-    } catch (err) {
-      setError(err.message || "Could not reach the backend.");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const getTips = async () => {
-    setLoadingTips(true);
-    try {
-      const data = await apiCall(`/goals/${goal.id}/tips`, { method: "GET" });
-      if (data.success) setTips(data.tips);
-    } catch (err) {
-      setTips("Could not reach the AI advisor right now.");
-    } finally {
-      setLoadingTips(false);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 1000,
-        padding: "20px",
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: "#161a1f",
-          border: "1px solid #242b35",
-          borderRadius: "16px",
-          padding: "28px",
-          width: "100%",
-          maxWidth: "460px",
-          maxHeight: "85vh",
-          overflowY: "auto",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "18px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <div
-              style={{
-                width: "44px",
-                height: "44px",
-                borderRadius: "12px",
-                background: `${meta.color}22`,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: "22px",
-              }}
-            >
-              {meta.icon}
-            </div>
-            <div>
-              <h3 style={{ color: "#fff", margin: 0 }}>{goal.goal_name}</h3>
-              <div style={{ color: "#9ca3af", fontSize: "12px" }}>{goal.category}</div>
-            </div>
-          </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", color: "#9ca3af", fontSize: "18px", cursor: "pointer" }}>
-            ✕
-          </button>
-        </div>
-
-        <button
-          onClick={deleteGoal}
-          disabled={deleting}
-          style={{
-            background: "none",
-            border: "1px solid #3f2020",
-            color: "#EF4444",
-            padding: "8px 14px",
-            borderRadius: "8px",
-            fontSize: "12px",
-            fontWeight: "600",
-            cursor: "pointer",
-            marginBottom: "18px",
-          }}
-        >
-          {deleting ? "Deleting…" : "🗑 Delete Goal"}
-        </button>
-
-        {isComplete && (
-          <div
-            style={{
-              background: "rgba(16,185,129,0.12)",
-              border: "1px solid #10B981",
-              borderRadius: "12px",
-              padding: "18px",
-              textAlign: "center",
-              marginBottom: "18px",
-            }}
-          >
-            <div style={{ fontSize: "30px" }}>🎉</div>
-            <div style={{ color: "#10B981", fontWeight: "700", margin: "6px 0 2px 0" }}>Goal completed!</div>
-            <div style={{ color: "#9ca3af", fontSize: "12px", marginBottom: "14px" }}>
-              You reached {currency(goal.target_amount)}. Time to set your next target.
-            </div>
-            <button
-              onClick={() => downloadCertificate(goal)}
-              style={{
-                background: "#10B981",
-                color: "#04241a",
-                border: "none",
-                padding: "10px 18px",
-                borderRadius: "8px",
-                fontWeight: "700",
-                fontSize: "13px",
-                cursor: "pointer",
-              }}
-            >
-              🏆 Download Certificate
-            </button>
-          </div>
-        )}
-
-        <ProgressBar percent={percent} color={meta.color} />
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px", marginBottom: "20px", fontSize: "13px" }}>
-          <span style={{ color: "#10B981", fontWeight: "700" }}>{currency(goal.current_saved)} saved</span>
-          <span style={{ color: "#9ca3af" }}>{Math.min(100, percent).toFixed(0)}% of {currency(goal.target_amount)}</span>
-        </div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "20px" }}>
-          <div style={statBox}>
-            <div style={statLabel}>TARGET DATE</div>
-            <div style={statValue}>{goal.target_date || "—"}</div>
-          </div>
-          <div style={statBox}>
-            <div style={statLabel}>MONTHLY PLAN</div>
-            <div style={statValue}>{currency(goal.monthly_saving)}</div>
-          </div>
-        </div>
-
-        {!isComplete && (
-          <div style={{ marginBottom: "20px" }}>
-            <label style={labelStyle}>Add money to this goal</label>
-            <div style={{ display: "flex", gap: "10px" }}>
-              <input
-                type="number"
-                value={addAmount}
-                onChange={(e) => setAddAmount(e.target.value)}
-                placeholder="Amount in ₹"
-                style={{ ...inputStyle, flex: 1 }}
-              />
-              <button
-                onClick={addMoney}
-                disabled={saving}
-                style={{
-                  background: "#0D9488",
-                  color: "#fff",
-                  border: "none",
-                  padding: "0 18px",
-                  borderRadius: "8px",
-                  fontWeight: "700",
-                  cursor: "pointer",
-                  opacity: saving ? 0.7 : 1,
-                }}
-              >
-                {saving ? "…" : "Add"}
-              </button>
-            </div>
-            {error && <div style={{ color: "#EF4444", fontSize: "12px", marginTop: "6px" }}>{error}</div>}
-          </div>
-        )}
-
-        <div>
-          <button
-            onClick={getTips}
-            disabled={loadingTips}
-            style={{
-              background: "rgba(13,148,136,0.15)",
-              border: "1px solid #0D9488",
-              color: "#0D9488",
-              padding: "10px 16px",
-              borderRadius: "8px",
-              fontWeight: "600",
-              fontSize: "13px",
-              cursor: "pointer",
-              width: "100%",
-            }}
-          >
-            {loadingTips ? "Thinking…" : isComplete ? "✨ What should I save for next?" : "✨ Get AI tips to reach this faster"}
-          </button>
-          {tips && (
-            <div style={{ marginTop: "12px", background: "#0B1420", border: "1px solid #242b35", borderRadius: "10px", padding: "14px", color: "#CBD5E1", fontSize: "13px", lineHeight: "1.6", whiteSpace: "pre-wrap" }}>
-              {tips}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const labelStyle = { display: "block", color: "#9ca3af", fontSize: "12px", marginBottom: "6px", fontWeight: "600" };
-const inputStyle = {
-  width: "100%",
-  background: "#0B1420",
-  border: "1px solid #242b35",
-  borderRadius: "8px",
-  padding: "10px 12px",
-  color: "#fff",
-  fontSize: "14px",
-  outline: "none",
-  boxSizing: "border-box",
-};
-const statBox = { background: "#0B1420", border: "1px solid #242b35", borderRadius: "10px", padding: "12px" };
-const statLabel = { color: "#6b7280", fontSize: "10px", letterSpacing: "0.05em", marginBottom: "4px" };
-const statValue = { color: "#fff", fontSize: "15px", fontWeight: "700" };
-
-function SummaryStats({ refreshKey }) {
-  const [summary, setSummary] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    apiCall("/goals/summary", { method: "GET" })
-      .then((data) => {
-        if (!cancelled && data.success) setSummary(data);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
-
-  if (!summary) return null;
-
-  const stats = [
-    { label: "TOTAL GOALS", value: summary.total_goals, icon: "🎯", color: "#3B82F6" },
-    { label: "TOTAL SAVED", value: currency(summary.total_saved), icon: "💰", color: "#10B981" },
-    { label: "COMPLETED", value: summary.completed_goals, icon: "🏆", color: "#F59E0B" },
-    { label: "OVERALL PROGRESS", value: `${summary.overall_progress}%`, icon: "📈", color: "#0D9488" },
-  ];
-
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "14px", marginBottom: "26px" }}>
-      {stats.map((s) => (
-        <div key={s.label} style={{ background: "#161a1f", border: "1px solid #242b35", borderRadius: "12px", padding: "16px 18px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
-            <span>{s.icon}</span>
-            <span style={{ color: "#6b7280", fontSize: "11px", letterSpacing: "0.05em" }}>{s.label}</span>
-          </div>
-          <div style={{ color: s.color, fontSize: "22px", fontWeight: "700" }}>{s.value}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SuggestionBanner({ onApplied, refreshKey }) {
-  const [suggestion, setSuggestion] = useState(null);
-  const [applying, setApplying] = useState(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    apiCall("/goals/suggest-allocation", { method: "GET" })
-      .then((data) => {
-        if (cancelled) return;
-        if (data.success && data.suggestions && data.suggestions.length > 0) {
-          setSuggestion(data);
-        } else {
-          setSuggestion(false);
-        }
-      })
-      .catch((err) => {
-        console.warn("Savings suggestion unavailable:", err.message);
-        setSuggestion(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey]);
-
-  if (!suggestion) return null;
-
-  const applySuggestion = async (goalId, amount) => {
-    setApplying(goalId);
-    try {
-      await apiCall(`/goals/${goalId}/add-money`, {
-        method: "POST",
-        body: JSON.stringify({ amount }),
-      });
-      setSuggestion((prev) => ({
-        ...prev,
-        suggestions: prev.suggestions.filter((s) => s.goal_id !== goalId),
-      }));
-      onApplied();
-    } catch (err) {
-      // stay on the banner, let them retry
-    } finally {
-      setApplying(null);
-    }
-  };
-
-  return (
-    <div
-      style={{
-        background: "rgba(13,148,136,0.12)",
-        border: "1px solid #0D9488",
-        borderRadius: "14px",
-        padding: "18px 20px",
-        marginBottom: "26px",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "12px" }}>
-        <span style={{ fontSize: "18px" }}>✨</span>
-        <div>
-          <div style={{ color: "#fff", fontWeight: "700", fontSize: "14px" }}>
-            You have {currency(suggestion.available_amount)} in unallocated savings
-          </div>
-          <div style={{ color: "#9ca3af", fontSize: "12px" }}>
-            Based on your income, expenses, and current monthly goal plans — want to put some toward a goal?
-          </div>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-        {suggestion.suggestions.map((s) => (
-          <div
-            key={s.goal_id}
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              background: "#0B1420",
-              borderRadius: "8px",
-              padding: "10px 14px",
-            }}
-          >
-            <span style={{ color: "#fff", fontSize: "13px" }}>
-              {s.goal_name} <span style={{ color: "#10B981", fontWeight: "700" }}>+{currency(s.suggested_amount)}</span>
-            </span>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button
-                onClick={() => applySuggestion(s.goal_id, s.suggested_amount)}
-                disabled={applying === s.goal_id}
-                style={{
-                  background: "#0D9488",
-                  border: "none",
-                  color: "#fff",
-                  padding: "6px 14px",
-                  borderRadius: "6px",
-                  fontSize: "12px",
-                  fontWeight: "700",
-                  cursor: "pointer",
-                }}
-              >
-                {applying === s.goal_id ? "Adding…" : "Yes, add it"}
-              </button>
-              <button
-                onClick={() =>
-                  setSuggestion((prev) => ({
-                    ...prev,
-                    suggestions: prev.suggestions.filter((x) => x.goal_id !== s.goal_id),
-                  }))
-                }
-                style={{
-                  background: "none",
-                  border: "1px solid #242b35",
-                  color: "#9ca3af",
-                  padding: "6px 14px",
-                  borderRadius: "6px",
-                  fontSize: "12px",
-                  cursor: "pointer",
-                }}
-              >
-                Skip
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-export default function Goals({ transactions } = {}) {
-  const [goals, setGoals] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [showCreate, setShowCreate] = useState(false);
-  const [selectedGoal, setSelectedGoal] = useState(null);
-  const [bannerRefreshKey, setBannerRefreshKey] = useState(0);
+  const [success, setSuccess] = useState("");
+  const [budgetAlert, setBudgetAlert] = useState(null);
 
-  const loadGoals = async () => {
+  // ==========================================================
+  // LIMIT FORM
+  // ==========================================================
+
+  const [showLimitForm, setShowLimitForm] = useState(false);
+  const [limitCategory, setLimitCategory] = useState("Food");
+  const [limitAmount, setLimitAmount] = useState("");
+
+  // ==========================================================
+  // EXPENSE FORM
+  // ==========================================================
+
+  const [showExpenseForm, setShowExpenseForm] = useState(false);
+  const [expenseAmount, setExpenseAmount] = useState("");
+  const [expenseCategory, setExpenseCategory] = useState("Food");
+  const [expenseDescription, setExpenseDescription] = useState("");
+  const [expenseDate, setExpenseDate] = useState(today());
+
+  // ==========================================================
+  // API HELPER
+  // ==========================================================
+
+  async function api(endpoint, options = {}) {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      credentials: "include",
+      ...options,
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
+    });
+
+    let data = {};
+
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      const message =
+        data.error ||
+        data.message ||
+        `Server returned status code: ${response.status}`;
+
+      const error = new Error(message);
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
+
+    return data;
+  }
+
+  // ==========================================================
+  // OPTIONAL API LOADERS
+  // ==========================================================
+  // Each request is independent. A missing optional endpoint
+  // must NOT prevent the rest of the Goals page from working.
+
+  async function loadCategories() {
+    try {
+      const data = await api("/budget/categories");
+
+      if (Array.isArray(data.categories) && data.categories.length) {
+        setCategories(data.categories);
+      }
+    } catch (err) {
+      console.warn("Categories endpoint unavailable:", err);
+      setCategories(DEFAULT_CATEGORIES);
+    }
+  }
+
+  async function loadLimits() {
+    try {
+      const data = await api("/budget/limits");
+      setLimits(Array.isArray(data.limits) ? data.limits : []);
+      return Array.isArray(data.limits) ? data.limits : [];
+    } catch (err) {
+      // 404/empty means the user simply has no limits or the
+      // optional endpoint is not available. Do not block the UI.
+      console.warn("Limits endpoint unavailable:", err);
+      setLimits([]);
+      return [];
+    }
+  }
+
+  async function loadTodayExpenses() {
+    try {
+      const data = await api("/budget/expenses/today");
+      const expenses = Array.isArray(data.expenses)
+        ? data.expenses
+        : [];
+
+      setTodayExpenses(expenses);
+      return expenses;
+    } catch (err) {
+      console.warn("Today's expenses endpoint unavailable:", err);
+      setTodayExpenses([]);
+      return [];
+    }
+  }
+
+  async function loadSummary() {
+    try {
+      const data = await api("/budget/summary");
+
+      const summary = {
+        total: Number(data.total || 0),
+        categories: Array.isArray(data.categories)
+          ? data.categories
+          : [],
+      };
+
+      setMonthlySummary(summary);
+      return summary;
+    } catch (err) {
+      console.warn("Budget summary endpoint unavailable:", err);
+      setMonthlySummary({
+        total: 0,
+        categories: [],
+      });
+
+      return {
+        total: 0,
+        categories: [],
+      };
+    }
+  }
+
+  // ==========================================================
+  // LOAD EVERYTHING
+  // ==========================================================
+
+  async function loadData() {
     setLoading(true);
     setError("");
+
     try {
-      const data = await apiCall("/goals", { method: "GET" });
-      setGoals(Array.isArray(data.goals) ? data.goals : []);
+      await Promise.all([
+        loadCategories(),
+        loadLimits(),
+        loadTodayExpenses(),
+        loadSummary(),
+      ]);
     } catch (err) {
-      setError(err.message || "Could not load your goals.");
+      console.error("Goals loading error:", err);
+      setError(err.message || "Unable to load spending data.");
     } finally {
       setLoading(false);
     }
-  };
-
-  const txSignature = transactions
-    ? `${transactions.length}:${transactions.reduce((s, t) => s + (Number(t.amount) || 0), 0)}`
-    : "";
+  }
 
   useEffect(() => {
-    if (!txSignature) return;
-    setBannerRefreshKey((k) => k + 1);
-  }, [txSignature]);
-
-  useEffect(() => {
-    loadGoals();
+    loadData();
   }, []);
 
-  const activeGoals = goals.filter((g) => (g.target_amount ? g.current_saved / g.target_amount : 0) < 1);
-  const completedGoals = goals.filter((g) => (g.target_amount ? g.current_saved / g.target_amount : 0) >= 1);
+  // ==========================================================
+  // SAVE SPENDING LIMIT
+  // ==========================================================
+
+  async function saveLimit(e) {
+    e.preventDefault();
+
+    setError("");
+    setSuccess("");
+    setBudgetAlert(null);
+
+    const category = String(limitCategory || "").trim();
+    const amount = Number(limitAmount);
+
+    if (!category) {
+      setError("Please select a category.");
+      return;
+    }
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Please enter a valid monthly limit.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      await api("/budget/limits", {
+        method: "POST",
+        body: JSON.stringify({
+          category,
+          monthly_limit: amount,
+        }),
+      });
+
+      setSuccess(
+        `${category} monthly limit of ${money(amount)} saved successfully.`
+      );
+
+      setLimitAmount("");
+      setShowLimitForm(false);
+
+      await loadLimits();
+      await loadSummary();
+    } catch (err) {
+      console.error("Save limit error:", err);
+
+      setError(
+        err.message ||
+          "Unable to save spending limit. Check that /budget/limits exists in Flask."
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ==========================================================
+  // FIND MATCHING LIMIT
+  // ==========================================================
+
+  function findMatchingLimit(category, currentLimits = limits) {
+    const target = normalizeCategory(category);
+
+    return currentLimits.find(
+      (limit) =>
+        normalizeCategory(limit.category) === target
+    );
+  }
+
+  // ==========================================================
+  // BUILD LOCAL BUDGET ALERT
+  // ==========================================================
+  //
+  // This is important:
+  // Even if the backend does not return a "limit" object after
+  // POST /budget/expense, we calculate the alert locally from
+  // the user's actual loaded limit.
+
+  function buildBudgetAlert(
+    category,
+    addedAmount,
+    currentLimits = limits,
+    currentSummary = monthlySummary
+  ) {
+    const matchingLimit = findMatchingLimit(
+      category,
+      currentLimits
+    );
+
+    // No limit is perfectly valid.
+    if (!matchingLimit) {
+      return {
+        type: "none",
+        category,
+        addedAmount,
+        message: `₹${Number(
+          addedAmount
+        ).toLocaleString("en-IN")} expense added to ${category}. No spending limit is set for ${category}.`,
+      };
+    }
+
+    const limitAmount = getLimitAmount(matchingLimit);
+
+    // Try backend's current spent first.
+    let spentBefore = getSpentFromLimit(matchingLimit);
+
+    // If backend didn't provide spent, calculate from monthly
+    // category summary.
+    if (!spentBefore) {
+      const summaryItem =
+        (currentSummary.categories || []).find(
+          (item) =>
+            normalizeCategory(item.category) ===
+            normalizeCategory(category)
+        );
+
+      if (summaryItem) {
+        spentBefore = Number(
+          summaryItem.spent ??
+            summaryItem.amount ??
+            0
+        );
+      }
+    }
+
+    const spentAfter = spentBefore + Number(addedAmount || 0);
+    const state = calculateLimitState(
+      spentAfter,
+      limitAmount
+    );
+
+    if (state.status === "exceeded") {
+      return {
+        type: "exceeded",
+        category,
+        spent: spentAfter,
+        limit: limitAmount,
+        exceededBy: state.exceededBy,
+        percentage: state.percentage,
+        message:
+          `🚨 ${category} budget exceeded! ` +
+          `You have spent ${money(spentAfter)} ` +
+          `against your ${money(limitAmount)} limit. ` +
+          `You are over the limit by ${money(state.exceededBy)}.`,
+      };
+    }
+
+    if (state.status === "warning") {
+      return {
+        type: "warning",
+        category,
+        spent: spentAfter,
+        limit: limitAmount,
+        remaining: state.remaining,
+        percentage: state.percentage,
+        message:
+          `⚠️ ${category} budget warning! ` +
+          `You have used ${state.percentage.toFixed(0)}% of your ` +
+          `${money(limitAmount)} limit. ` +
+          `${money(state.remaining)} remains.`,
+      };
+    }
+
+    return {
+      type: "within",
+      category,
+      spent: spentAfter,
+      limit: limitAmount,
+      remaining: state.remaining,
+      percentage: state.percentage,
+      message:
+        `✅ ${category} expense added. ` +
+        `${money(state.remaining)} remains from your ` +
+        `${money(limitAmount)} limit.`,
+    };
+  }
+
+  // ==========================================================
+  // ADD EXPENSE
+  // ==========================================================
+
+  async function addExpense(e) {
+    e.preventDefault();
+
+    setError("");
+    setSuccess("");
+    setBudgetAlert(null);
+
+    const amount = Number(expenseAmount);
+    const category = String(expenseCategory || "Other").trim();
+    const description =
+      String(expenseDescription || "").trim() ||
+      "Manual expense";
+    const date = expenseDate || today();
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Please enter a valid expense amount.");
+      return;
+    }
+
+    if (!category) {
+      setError("Please select a category.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      // Save through the existing budget endpoint.
+      const result = await api("/budget/expense", {
+        method: "POST",
+        body: JSON.stringify({
+          amount,
+          category,
+          description,
+          transaction_date: date,
+        }),
+      });
+
+      // Prefer the backend's limit information when available.
+      // Otherwise calculate it ourselves.
+      let alert = null;
+
+      if (result.limit) {
+        const backendLimit = result.limit;
+        const status = backendLimit.status;
+
+        if (status === "exceeded") {
+          const limitAmount =
+            Number(
+              backendLimit.monthly_limit ||
+                backendLimit.limit ||
+                0
+            );
+
+          const spent =
+            Number(
+              backendLimit.spent ||
+                backendLimit.current_spending ||
+                0
+            );
+
+          const exceededBy =
+            Math.max(
+              spent - limitAmount,
+              0
+            );
+
+          alert = {
+            type: "exceeded",
+            category,
+            spent,
+            limit: limitAmount,
+            exceededBy,
+            percentage:
+              Number(
+                backendLimit.percentage || 0
+              ),
+            message:
+              result.message ||
+              `🚨 ${category} budget exceeded by ${money(
+                exceededBy
+              )}.`,
+          };
+        } else if (status === "warning") {
+          alert = {
+            type: "warning",
+            category,
+            percentage:
+              Number(
+                backendLimit.percentage || 0
+              ),
+            remaining:
+              Number(
+                backendLimit.remaining || 0
+              ),
+            message:
+              result.message ||
+              `⚠️ ${category} spending is at ${Number(
+                backendLimit.percentage || 0
+              ).toFixed(0)}% of the limit.`,
+          };
+        }
+      }
+
+      if (!alert) {
+        alert = buildBudgetAlert(
+          category,
+          amount
+        );
+      }
+
+      setBudgetAlert(alert);
+
+      // Do NOT show a generic green success message over an alert.
+      if (alert.type === "exceeded") {
+        setSuccess("");
+      } else if (alert.type === "warning") {
+        setSuccess("");
+      } else {
+        setSuccess(alert.message);
+      }
+
+      setExpenseAmount("");
+      setExpenseDescription("");
+      setExpenseDate(today());
+      setShowExpenseForm(false);
+
+      // Refresh all displayed values.
+      await Promise.all([
+        loadLimits(),
+        loadTodayExpenses(),
+        loadSummary(),
+      ]);
+    } catch (err) {
+      console.error("Add expense error:", err);
+
+      setError(
+        err.message ||
+          "Unable to add expense. Check that /budget/expense exists in Flask."
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ==========================================================
+  // DELETE LIMIT
+  // ==========================================================
+
+  async function deleteLimit(id) {
+    if (!id) {
+      setError("Invalid spending limit ID.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Delete this spending limit?"
+    );
+
+    if (!confirmed) return;
+
+    setError("");
+    setSuccess("");
+    setBudgetAlert(null);
+
+    try {
+      await api(`/budget/limits/${id}`, {
+        method: "DELETE",
+      });
+
+      setSuccess("Spending limit deleted successfully.");
+      await loadLimits();
+    } catch (err) {
+      console.error("Delete limit error:", err);
+
+      setError(
+        err.message ||
+          "Unable to delete spending limit."
+      );
+    }
+  }
+
+  // ==========================================================
+  // TOTAL TODAY
+  // ==========================================================
+
+  const todayTotal = useMemo(() => {
+    return todayExpenses.reduce(
+      (sum, item) =>
+        sum + Number(item.amount || 0),
+      0
+    );
+  }, [todayExpenses]);
+
+  // ==========================================================
+  // TRANSACTION FALLBACK
+  // ==========================================================
+
+  const fallbackTodayTotal = useMemo(() => {
+    return transactions
+      .filter((item) => {
+        if (!item.transaction_date) return false;
+
+        return String(item.transaction_date).startsWith(
+          today()
+        );
+      })
+      .filter((item) => {
+        return [
+          "expense",
+          "debit",
+          "outflow",
+        ].includes(
+          String(item.type || "").toLowerCase()
+        );
+      })
+      .reduce(
+        (sum, item) =>
+          sum + Number(item.amount || 0),
+        0
+      );
+  }, [transactions]);
+
+  const displayedTodayTotal =
+    todayTotal || fallbackTodayTotal;
+
+  // ==========================================================
+  // LIMIT CARD DATA
+  // ==========================================================
+
+  const displayLimits = useMemo(() => {
+    return limits.map((limit) => {
+      const spent = getSpentFromLimit(limit);
+      const amount = getLimitAmount(limit);
+
+      const localState =
+        calculateLimitState(
+          spent,
+          amount
+        );
+
+      // Keep backend status if it exists and is meaningful.
+      const backendStatus =
+        ["warning", "exceeded", "within"].includes(
+          limit.status
+        )
+          ? limit.status
+          : null;
+
+      return {
+        ...limit,
+        spent,
+        monthly_limit: amount,
+        percentage:
+          Number.isFinite(
+            Number(limit.percentage)
+          )
+            ? Number(limit.percentage)
+            : localState.percentage,
+        remaining:
+          Number.isFinite(
+            Number(limit.remaining)
+          )
+            ? Number(limit.remaining)
+            : localState.remaining,
+        status:
+          backendStatus ||
+          (localState.status === "exceeded"
+            ? "exceeded"
+            : localState.status === "warning"
+              ? "warning"
+              : "within"),
+      };
+    });
+  }, [limits]);
+
+  // ==========================================================
+  // RENDER
+  // ==========================================================
 
   return (
-    <div style={{ color: "#fff" }}>
-      <div style={{ marginBottom: "30px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        padding: "40px",
+        color: "#fff",
+        boxSizing: "border-box",
+      }}
+    >
+      {/* ======================================================
+          HEADER
+      ====================================================== */}
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "35px",
+          gap: "20px",
+          flexWrap: "wrap",
+        }}
+      >
         <div>
-          <h1 style={{ margin: 0, fontSize: "28px", fontWeight: "700" }}>Goals</h1>
-          <p style={{ margin: "4px 0 0 0", color: "#9ca3af", fontSize: "14px" }}>
-            Track what you're saving for, and let AI keep the plan on pace.
-          </p>
-        </div>
-        {goals.length > 0 && (
-          <button
-            onClick={() => setShowCreate(true)}
+          <h1
             style={{
-              background: "#0D9488",
-              color: "#fff",
-              border: "none",
-              padding: "12px 20px",
-              borderRadius: "8px",
-              fontWeight: "600",
-              cursor: "pointer",
+              fontSize: "38px",
+              margin: 0,
             }}
           >
-            + Add Goal
+            Goals
+          </h1>
+
+          <p
+            style={{
+              color: "#9aa9bd",
+              fontSize: "17px",
+            }}
+          >
+            Track your savings, spending limits
+            and daily expenses.
+          </p>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: "12px",
+            flexWrap: "wrap",
+          }}
+        >
+          <button
+            onClick={() =>
+              setShowExpenseForm(
+                !showExpenseForm
+              )
+            }
+            style={buttonStyle}
+          >
+            + Add Today's Expense
           </button>
+
+          <button
+            onClick={() =>
+              setShowLimitForm(
+                !showLimitForm
+              )
+            }
+            style={buttonStyle}
+          >
+            + Set Spending Limit
+          </button>
+        </div>
+      </div>
+
+      {/* ======================================================
+          MESSAGES
+      ====================================================== */}
+
+      {error && (
+        <div style={errorStyle}>
+          ⚠️ {error}
+        </div>
+      )}
+
+      {success && (
+        <div style={successStyle}>
+          {success}
+        </div>
+      )}
+
+      {/* ======================================================
+          BUDGET ALERT
+      ====================================================== */}
+
+      {budgetAlert &&
+        budgetAlert.type === "exceeded" && (
+          <div style={dangerAlertStyle}>
+            <div
+              style={{
+                fontSize: "25px",
+                fontWeight: 900,
+                marginBottom: "8px",
+              }}
+            >
+              🚨 Spending Limit Exceeded
+            </div>
+
+            <div
+              style={{
+                fontSize: "16px",
+                lineHeight: 1.7,
+              }}
+            >
+              <strong>
+                {budgetAlert.category}
+              </strong>{" "}
+              spending has reached{" "}
+              <strong>
+                {money(budgetAlert.spent)}
+              </strong>{" "}
+              against your{" "}
+              <strong>
+                {money(budgetAlert.limit)}
+              </strong>{" "}
+              monthly limit.
+              <br />
+              You are over the limit by{" "}
+              <strong>
+                {money(
+                  budgetAlert.exceededBy
+                )}
+              </strong>
+              .
+            </div>
+          </div>
+        )}
+
+      {budgetAlert &&
+        budgetAlert.type === "warning" && (
+          <div style={warningAlertStyle}>
+            <div
+              style={{
+                fontSize: "23px",
+                fontWeight: 900,
+                marginBottom: "8px",
+              }}
+            >
+              ⚠️ Spending Warning
+            </div>
+
+            <div
+              style={{
+                fontSize: "16px",
+                lineHeight: 1.7,
+              }}
+            >
+              <strong>
+                {budgetAlert.category}
+              </strong>{" "}
+              has used{" "}
+              <strong>
+                {Number(
+                  budgetAlert.percentage || 0
+                ).toFixed(0)}
+                %
+              </strong>{" "}
+              of the monthly limit.
+              <br />
+              Remaining:{" "}
+              <strong>
+                {money(
+                  budgetAlert.remaining
+                )}
+              </strong>
+            </div>
+          </div>
+        )}
+
+      {budgetAlert &&
+        budgetAlert.type === "none" && (
+          <div style={infoAlertStyle}>
+            💡 {budgetAlert.message}
+            <button
+              onClick={() =>
+                setShowLimitForm(true)
+              }
+              style={smallActionButton}
+            >
+              Set {budgetAlert.category} Limit
+            </button>
+          </div>
+        )}
+
+      {/* ======================================================
+          TODAY / MONTH / LIMITS
+      ====================================================== */}
+
+      <div style={gridStyle}>
+        <div style={cardStyle}>
+          <div style={labelStyle}>
+            TODAY'S EXPENSE
+          </div>
+
+          <div
+            style={{
+              fontSize: "32px",
+              fontWeight: 800,
+              marginTop: "10px",
+            }}
+          >
+            {money(displayedTodayTotal)}
+          </div>
+
+          <p style={mutedStyle}>
+            Total expenses recorded today
+          </p>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={labelStyle}>
+            THIS MONTH
+          </div>
+
+          <div
+            style={{
+              fontSize: "32px",
+              fontWeight: 800,
+              marginTop: "10px",
+            }}
+          >
+            {money(monthlySummary.total)}
+          </div>
+
+          <p style={mutedStyle}>
+            Total monthly spending
+          </p>
+        </div>
+
+        <div style={cardStyle}>
+          <div style={labelStyle}>
+            ACTIVE LIMITS
+          </div>
+
+          <div
+            style={{
+              fontSize: "32px",
+              fontWeight: 800,
+              marginTop: "10px",
+            }}
+          >
+            {displayLimits.length}
+          </div>
+
+          <p style={mutedStyle}>
+            Categories being monitored
+          </p>
+        </div>
+      </div>
+
+      {/* ======================================================
+          MANUAL EXPENSE FORM
+      ====================================================== */}
+
+      {showExpenseForm && (
+        <div style={largeCard}>
+          <h2>
+            📝 Enter Today's Expense
+          </h2>
+
+          <p style={mutedStyle}>
+            Enter your expense manually. A spending
+            limit is optional — you can add expenses
+            even when you have no limits.
+          </p>
+
+          <form
+            onSubmit={addExpense}
+            style={formGrid}
+          >
+            <div>
+              <label style={labelStyle}>
+                Expense Amount *
+              </label>
+
+              <input
+                type="number"
+                min="0.01"
+                step="0.01"
+                placeholder="Example: 500"
+                value={expenseAmount}
+                onChange={(e) =>
+                  setExpenseAmount(
+                    e.target.value
+                  )
+                }
+                style={inputStyle}
+                required
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                Category *
+              </label>
+
+              <select
+                value={expenseCategory}
+                onChange={(e) =>
+                  setExpenseCategory(
+                    e.target.value
+                  )
+                }
+                style={inputStyle}
+              >
+                {categories.map(
+                  (category) => (
+                    <option
+                      key={category}
+                      value={category}
+                    >
+                      {category}
+                    </option>
+                  )
+                )}
+              </select>
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                Date *
+              </label>
+
+              <input
+                type="date"
+                value={expenseDate}
+                onChange={(e) =>
+                  setExpenseDate(
+                    e.target.value
+                  )
+                }
+                style={inputStyle}
+                required
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                Description
+              </label>
+
+              <input
+                type="text"
+                placeholder="Example: Lunch at college"
+                value={expenseDescription}
+                onChange={(e) =>
+                  setExpenseDescription(
+                    e.target.value
+                  )
+                }
+                style={inputStyle}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={saving}
+              style={{
+                ...buttonStyle,
+                gridColumn: "1 / -1",
+                opacity: saving ? 0.6 : 1,
+              }}
+            >
+              {saving
+                ? "Saving..."
+                : "💾 Save Today's Expense"}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* ======================================================
+          LIMIT FORM
+      ====================================================== */}
+
+      {showLimitForm && (
+        <div style={largeCard}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: "20px",
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <h2>
+                💸 Set Monthly Spending Limit
+              </h2>
+
+              <p style={mutedStyle}>
+                Set a limit only if you want
+                AmiVest to warn you about spending.
+              </p>
+            </div>
+
+            <button
+              onClick={() =>
+                setShowLimitForm(false)
+              }
+              style={secondaryButton}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+
+          <form
+            onSubmit={saveLimit}
+            style={formGrid}
+          >
+            <div>
+              <label style={labelStyle}>
+                Category *
+              </label>
+
+              <select
+                value={limitCategory}
+                onChange={(e) =>
+                  setLimitCategory(
+                    e.target.value
+                  )
+                }
+                style={inputStyle}
+              >
+                {categories.map(
+                  (category) => (
+                    <option
+                      key={category}
+                      value={category}
+                    >
+                      {category}
+                    </option>
+                  )
+                )}
+              </select>
+            </div>
+
+            <div>
+              <label style={labelStyle}>
+                Monthly Limit *
+              </label>
+
+              <input
+                type="number"
+                min="1"
+                step="0.01"
+                placeholder="Example: 5000"
+                value={limitAmount}
+                onChange={(e) =>
+                  setLimitAmount(
+                    e.target.value
+                  )
+                }
+                style={inputStyle}
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={saving}
+              style={{
+                ...buttonStyle,
+                gridColumn: "1 / -1",
+                opacity: saving ? 0.6 : 1,
+              }}
+            >
+              {saving
+                ? "Saving..."
+                : "💾 Save Limit"}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* ======================================================
+          SPENDING LIMITS
+      ====================================================== */}
+
+      <div style={largeCard}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: "20px",
+            gap: "20px",
+          }}
+        >
+          <div>
+            <h2>
+              💸 Spending Limits
+            </h2>
+
+            <p style={mutedStyle}>
+              AmiVest watches your spending
+              against the limits you set.
+            </p>
+          </div>
+
+          {displayLimits.length > 0 && (
+            <span
+              style={{
+                padding: "8px 13px",
+                borderRadius: "20px",
+                background: "#102b3a",
+                color: "#5ce0d1",
+                fontWeight: 800,
+                fontSize: "13px",
+              }}
+            >
+              {displayLimits.length} active
+            </span>
+          )}
+        </div>
+
+        {loading ? (
+          <div style={emptyStyle}>
+            Loading your financial data...
+          </div>
+        ) : displayLimits.length === 0 ? (
+          <div style={emptyStyle}>
+            <div
+              style={{
+                fontSize: "55px",
+                marginBottom: "10px",
+              }}
+            >
+              🎯
+            </div>
+
+            <h3>
+              No spending limits yet
+            </h3>
+
+            <p style={mutedStyle}>
+              You don't have any spending
+              limits right now.
+              <br />
+              That's okay — your expenses
+              can still be recorded normally.
+            </p>
+
+            <button
+              onClick={() =>
+                setShowLimitForm(true)
+              }
+              style={buttonStyle}
+              type="button"
+            >
+              + Create Your First Limit
+            </button>
+          </div>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(280px, 1fr))",
+              gap: "18px",
+            }}
+          >
+            {displayLimits.map((limit) => {
+              const rawPercentage =
+                Number(
+                  limit.percentage || 0
+                );
+
+              const percentage = Math.min(
+                Math.max(rawPercentage, 0),
+                100
+              );
+
+              const status =
+                limit.status;
+
+              let statusText =
+                "✅ Within limit";
+
+              if (status === "warning") {
+                statusText =
+                  "⚠️ 80%+ used";
+              }
+
+              if (status === "exceeded") {
+                statusText =
+                  "🚨 Limit exceeded";
+              }
+
+              const spent =
+                Number(limit.spent || 0);
+
+              const limitAmount =
+                Number(
+                  limit.monthly_limit || 0
+                );
+
+              const exceededBy =
+                Math.max(
+                  spent - limitAmount,
+                  0
+                );
+
+              return (
+                <div
+                  key={limit.id || limit.category}
+                  style={{
+                    background: "#0b1726",
+                    border:
+                      status === "exceeded"
+                        ? "1px solid #ff4d4d"
+                        : status === "warning"
+                          ? "1px solid #ffb020"
+                          : "1px solid #26384e",
+                    borderRadius: "18px",
+                    padding: "22px",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent:
+                        "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <strong>
+                      {limit.category}
+                    </strong>
+
+                    {limit.id && (
+                      <button
+                        onClick={() =>
+                          deleteLimit(
+                            limit.id
+                          )
+                        }
+                        style={deleteButton}
+                        type="button"
+                        title="Delete limit"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: "18px",
+                      fontSize: "25px",
+                      fontWeight: 800,
+                    }}
+                  >
+                    {money(spent)}
+
+                    <span
+                      style={{
+                        color: "#7f8da0",
+                        fontSize: "15px",
+                        fontWeight: 500,
+                      }}
+                    >
+                      {" "}
+                      /{" "}
+                      {money(
+                        limitAmount
+                      )}
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
+                      height: "10px",
+                      background: "#172437",
+                      borderRadius: "20px",
+                      overflow: "hidden",
+                      marginTop: "18px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width:
+                          `${percentage}%`,
+                        height: "100%",
+                        background:
+                          status ===
+                          "exceeded"
+                            ? "#ff4d4d"
+                            : status ===
+                              "warning"
+                              ? "#ffb020"
+                              : "#12c9b5",
+                      }}
+                    />
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent:
+                        "space-between",
+                      marginTop: "12px",
+                      color: "#aab6c5",
+                      fontSize: "14px",
+                    }}
+                  >
+                    <span>
+                      {rawPercentage.toFixed(
+                        0
+                      )}
+                      % used
+                    </span>
+
+                    <span>
+                      {money(
+                        limit.remaining
+                      )}{" "}
+                      remaining
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: "14px",
+                      fontWeight: 700,
+                      color:
+                        status === "exceeded"
+                          ? "#ff6464"
+                          : status ===
+                              "warning"
+                            ? "#ffbd48"
+                            : "#1dd6bc",
+                    }}
+                  >
+                    {statusText}
+                  </div>
+
+                  {status === "exceeded" && (
+                    <div
+                      style={{
+                        marginTop: "12px",
+                        padding: "12px",
+                        borderRadius: "10px",
+                        background: "#351c23",
+                        color: "#ff858f",
+                        fontSize: "14px",
+                        fontWeight: 700,
+                      }}
+                    >
+                      🚨 Over budget by{" "}
+                      {money(exceededBy)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 
-      <SummaryStats refreshKey={goals.length + goals.reduce((sum, g) => sum + g.current_saved, 0)} />
+      {/* ======================================================
+          TODAY'S EXPENSE HISTORY
+      ====================================================== */}
 
-      {/* CHANGED: added — real spending-limit tracker */}
-      <BudgetLimits />
+      <div style={largeCard}>
+        <h2>
+          📅 Today's Expense History
+        </h2>
 
-      {!loading && !error && goals.length > 0 && <SuggestionBanner onApplied={loadGoals} refreshKey={bannerRefreshKey} />}
+        <p style={mutedStyle}>
+          Manually entered expenses for today.
+        </p>
 
-      {loading && <div style={{ color: "#9ca3af" }}>Loading goals…</div>}
-
-      {!loading && error && (
-        <div style={{ background: "#161a1f", border: "1px solid #EF4444", borderRadius: "12px", padding: "18px", color: "#FCA5A5", fontSize: "13px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", marginBottom: error.includes("|") ? "10px" : 0 }}>
-            <span style={{ fontWeight: "700" }}>⚠️ Could not load goals</span>
-            <button
-              onClick={loadGoals}
+        {todayExpenses.length === 0 ? (
+          <div style={emptyStyle}>
+            <div
               style={{
-                background: "none",
-                border: "1px solid #EF4444",
-                color: "#FCA5A5",
-                padding: "8px 16px",
-                borderRadius: "6px",
-                fontSize: "13px",
-                fontWeight: "600",
-                cursor: "pointer",
-                whiteSpace: "nowrap",
+                fontSize: "40px",
               }}
             >
-              Retry
-            </button>
+              📝
+            </div>
+
+            <h3>
+              No expenses recorded today
+            </h3>
+
+            <p style={mutedStyle}>
+              Start by clicking
+              "Add Today's Expense".
+            </p>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontFamily: "monospace", fontSize: "12px", opacity: 0.85 }}>
-            {error.split("  |  ").map((line, i) => (
-              <div key={i}>{line}</div>
-            ))}
+        ) : (
+          <div>
+            {todayExpenses.map(
+              (expense) => (
+                <div
+                  key={expense.id}
+                  style={{
+                    display: "flex",
+                    justifyContent:
+                      "space-between",
+                    alignItems: "center",
+                    padding: "16px 5px",
+                    borderBottom:
+                      "1px solid #243247",
+                    gap: "20px",
+                  }}
+                >
+                  <div>
+                    <strong>
+                      {expense.category}
+                    </strong>
+
+                    <div
+                      style={{
+                        color: "#8998aa",
+                        fontSize: "14px",
+                        marginTop: "4px",
+                      }}
+                    >
+                      {expense.description ||
+                        "Manual expense"}
+                    </div>
+                  </div>
+
+                  <strong
+                    style={{
+                      color: "#ff6464",
+                      whiteSpace:
+                        "nowrap",
+                    }}
+                  >
+                    -{" "}
+                    {money(
+                      expense.amount
+                    )}
+                  </strong>
+                </div>
+              )
+            )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {!loading && !error && goals.length === 0 && <EmptyState onCreate={() => setShowCreate(true)} />}
+      {/* ======================================================
+          MONTHLY CATEGORY ANALYSIS
+      ====================================================== */}
 
-      {!loading && !error && goals.length > 0 && (
-        <>
-          {activeGoals.length > 0 && (
-            <>
-              <h4 style={{ color: "#9ca3af", fontSize: "13px", letterSpacing: "0.05em", marginBottom: "14px" }}>IN PROGRESS</h4>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "16px", marginBottom: "34px" }}>
-                {activeGoals.map((g) => (
-                  <GoalCard key={g.id} goal={g} onOpen={setSelectedGoal} />
-                ))}
+      <div style={largeCard}>
+        <h2>
+          📊 Monthly Category Analysis
+        </h2>
+
+        <p style={mutedStyle}>
+          See where your money is going this month.
+        </p>
+
+        {monthlySummary.categories.length ===
+        0 ? (
+          <div style={emptyStyle}>
+            No monthly expense data yet.
+          </div>
+        ) : (
+          monthlySummary.categories.map(
+            (item) => (
+              <div
+                key={item.category}
+                style={{
+                  display: "flex",
+                  justifyContent:
+                    "space-between",
+                  padding: "14px 0",
+                  borderBottom:
+                    "1px solid #243247",
+                }}
+              >
+                <span>
+                  {item.category}
+                </span>
+
+                <strong>
+                  {money(item.spent)}
+                </strong>
               </div>
-            </>
-          )}
-
-          {completedGoals.length > 0 && (
-            <>
-              <h4 style={{ color: "#9ca3af", fontSize: "13px", letterSpacing: "0.05em", marginBottom: "14px" }}>COMPLETED 🎉</h4>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "16px" }}>
-                {completedGoals.map((g) => (
-                  <GoalCard key={g.id} goal={g} onOpen={setSelectedGoal} />
-                ))}
-              </div>
-            </>
-          )}
-        </>
-      )}
-
-      {showCreate && (
-        <CreateGoalModal
-          onClose={() => setShowCreate(false)}
-          onCreated={() => {
-            setShowCreate(false);
-            loadGoals();
-          }}
-        />
-      )}
-
-      {selectedGoal && (
-        <GoalDetailModal
-          goal={goals.find((g) => g.id === selectedGoal.id) || selectedGoal}
-          onClose={() => setSelectedGoal(null)}
-          onUpdated={loadGoals}
-          onDeleted={loadGoals}
-        />
-      )}
+            )
+          )
+        )}
+      </div>
     </div>
   );
 }
+
+// ============================================================
+// STYLES
+// ============================================================
+
+const buttonStyle = {
+  border: "none",
+  borderRadius: "12px",
+  padding: "13px 20px",
+  background:
+    "linear-gradient(135deg,#10b5a8,#10b8d0)",
+  color: "#fff",
+  fontWeight: 800,
+  cursor: "pointer",
+  fontSize: "15px",
+};
+
+const secondaryButton = {
+  border: "1px solid #2b4057",
+  borderRadius: "10px",
+  padding: "10px 16px",
+  background: "#0b1726",
+  color: "#cbd5e1",
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const smallActionButton = {
+  marginLeft: "15px",
+  border: "none",
+  borderRadius: "9px",
+  padding: "8px 12px",
+  background: "#0e9f92",
+  color: "#fff",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const cardStyle = {
+  background: "#151a21",
+  border: "1px solid #252d38",
+  borderRadius: "18px",
+  padding: "25px",
+};
+
+const largeCard = {
+  background: "#171c23",
+  border: "1px solid #252d38",
+  borderRadius: "20px",
+  padding: "28px",
+  marginBottom: "25px",
+};
+
+const gridStyle = {
+  display: "grid",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: "18px",
+  marginBottom: "25px",
+};
+
+const formGrid = {
+  display: "grid",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: "18px",
+  marginTop: "20px",
+};
+
+const inputStyle = {
+  width: "100%",
+  boxSizing: "border-box",
+  marginTop: "8px",
+  padding: "15px",
+  borderRadius: "12px",
+  border: "1px solid #26384e",
+  background: "#091625",
+  color: "#fff",
+  fontSize: "15px",
+  outline: "none",
+};
+
+const labelStyle = {
+  color: "#9ba8b9",
+  fontSize: "13px",
+  fontWeight: 700,
+  letterSpacing: "0.5px",
+};
+
+const mutedStyle = {
+  color: "#8998aa",
+  lineHeight: 1.6,
+};
+
+const errorStyle = {
+  background: "#321d24",
+  border: "1px solid #713743",
+  color: "#ff9da8",
+  padding: "15px",
+  borderRadius: "12px",
+  marginBottom: "20px",
+};
+
+const successStyle = {
+  background: "#102e2b",
+  border: "1px solid #1b7068",
+  color: "#5ce0d1",
+  padding: "15px",
+  borderRadius: "12px",
+  marginBottom: "20px",
+};
+
+const dangerAlertStyle = {
+  background:
+    "linear-gradient(135deg,#3b1820,#25151b)",
+  border: "1px solid #ff4d5d",
+  color: "#ffb5bd",
+  padding: "20px",
+  borderRadius: "15px",
+  marginBottom: "20px",
+  boxShadow:
+    "0 0 25px rgba(255,77,77,0.12)",
+};
+
+const warningAlertStyle = {
+  background:
+    "linear-gradient(135deg,#3b2b12,#241d12)",
+  border: "1px solid #ffb020",
+  color: "#ffd98a",
+  padding: "20px",
+  borderRadius: "15px",
+  marginBottom: "20px",
+};
+
+const infoAlertStyle = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: "10px",
+  background: "#10273a",
+  border: "1px solid #24577a",
+  color: "#9ed8ff",
+  padding: "16px",
+  borderRadius: "12px",
+  marginBottom: "20px",
+};
+
+const emptyStyle = {
+  textAlign: "center",
+  padding: "45px 20px",
+  color: "#8b99aa",
+};
+
+const deleteButton = {
+  border: "none",
+  background: "#34212a",
+  color: "#ff6b7a",
+  width: "32px",
+  height: "32px",
+  borderRadius: "8px",
+  cursor: "pointer",
+  fontSize: "20px",
+};

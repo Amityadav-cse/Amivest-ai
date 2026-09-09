@@ -1,271 +1,283 @@
-import React, { useState } from "react";
+import React, {
+  useEffect,
+  useState,
+} from "react";
 import { useNavigate } from "react-router-dom";
 
-// =====================================================
-// API CONFIG
-// =====================================================
+const BACKEND_URL =
+  import.meta.env.VITE_BACKEND_URL?.trim() ||
+  import.meta.env.VITE_API_URL?.trim() ||
+  "http://127.0.0.1:5000";
 
-const ENV_API_URL = import.meta.env.VITE_API_URL;
-
-const BASE_API_URL =
-  ENV_API_URL && ENV_API_URL.trim() !== ""
-    ? ENV_API_URL.replace(/\/$/, "")
-    : "http://127.0.0.1:5000";
-
-// =====================================================
-// UPLOAD API
-// =====================================================
-
-async function uploadFile(path, formData) {
-  const urls = [
-    `${BASE_API_URL}${path}`,
-    path,
-    `http://127.0.0.1:5000${path}`,
-    `http://localhost:5000${path}`,
-  ];
-
-  const attempts = [];
-
-  for (const url of [...new Set(urls)]) {
-    try {
-      console.log("Trying upload:", url);
-
-      const response = await fetch(url, {
-        method: "POST",
-        body: formData,
-      });
-
-      const contentType =
-        response.headers.get("content-type") || "";
-
-      let data;
-
-      if (contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        data = text;
-      }
-
-      console.log("Upload response:", data);
-
-      if (response.ok) {
-        if (typeof data === "object") {
-          return data;
-        }
-
-        attempts.push(
-          `${url} → HTTP ${response.status}, but response was not JSON`
-        );
-
-        continue;
-      }
-
-      const errorMessage =
-        typeof data === "object"
-          ? data?.error || data?.message
-          : data;
-
-      attempts.push(
-        `${url} → HTTP ${response.status}: ${
-          errorMessage || "Unknown server error"
-        }`
-      );
-    } catch (error) {
-      attempts.push(
-        `${url} → ${error.name}: ${error.message}`
-      );
-    }
-  }
-
-  throw new Error(attempts.join("\n"));
-}
-
-// =====================================================
-// IMPORT STATEMENT
-// =====================================================
-
-function ImportStatement({ setTransactions }) {
-  const [file, setFile] = useState(null);
-  const [password, setPassword] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-
+function ImportStatement() {
   const navigate = useNavigate();
 
-  // ===================================================
-  // HANDLE FILE UPLOAD
-  // ===================================================
+  const [file, setFile] = useState(null);
+  const [pdfPassword, setPdfPassword] =
+    useState("");
 
-  const handleUpload = async () => {
-    if (!file) {
-      alert("Please select a bank statement first.");
-      return;
-    }
+  const [loading, setLoading] =
+    useState(false);
 
-    // -------------------------------------------------
-    // GET LOGGED-IN USER
-    // -------------------------------------------------
+  const [message, setMessage] =
+    useState("");
 
-    const storedUser = localStorage.getItem("user");
+  const [error, setError] =
+    useState("");
 
-    if (!storedUser) {
-      alert("You are not logged in. Please login first.");
-      navigate("/login");
-      return;
-    }
+  const [user, setUser] =
+    useState(null);
 
-    let currentUser;
-
+  useEffect(() => {
     try {
-      currentUser = JSON.parse(storedUser);
-    } catch (error) {
-      console.error("Invalid user session:", error);
+      const stored =
+        localStorage.getItem("user");
 
-      alert("Your login session is invalid. Please login again.");
-
-      localStorage.removeItem("user");
-      navigate("/login");
-
-      return;
-    }
-
-    if (!currentUser?.id) {
-      alert(
-        "User ID was not found in your session. Please login again."
-      );
-
-      navigate("/login");
-      return;
-    }
-
-    // -------------------------------------------------
-    // START UPLOAD
-    // -------------------------------------------------
-
-    setIsProcessing(true);
-
-    const formData = new FormData();
-
-    formData.append("statement", file);
-    formData.append("password", password);
-
-    // IMPORTANT:
-    // Send the logged-in user's ID to Flask
-    formData.append(
-      "user_id",
-      String(currentUser.id)
-    );
-
-    try {
-      console.log("Uploading statement...");
-      console.log("User ID:", currentUser.id);
-      console.log("File:", file.name);
-
-      const data = await uploadFile(
-        "/upload",
-        formData
-      );
-
-      console.log("Backend upload result:", data);
-
-      // -------------------------------------------------
-      // SUCCESS
-      // -------------------------------------------------
-
-      if (data?.success === true) {
-        let importedTransactions = [];
-
-        if (Array.isArray(data.transactions)) {
-          importedTransactions = data.transactions;
-        } else if (Array.isArray(data.data)) {
-          importedTransactions = data.data;
-        }
-
-        console.log(
-          "Imported transactions:",
-          importedTransactions
-        );
-
-        // -------------------------------------------------
-        // UPDATE SHARED REACT STATE
-        // -------------------------------------------------
-
-        if (importedTransactions.length > 0) {
-          setTransactions((previousTransactions) => {
-            // Add the new transactions to existing state.
-            // This avoids accidentally deleting previous imports.
-
-            return [
-              ...previousTransactions,
-              ...importedTransactions,
-            ];
-          });
-
-          alert(
-            `Successfully imported ${importedTransactions.length} transactions.`
-          );
-        } else {
-          alert(
-            "Statement uploaded successfully, but no transactions were returned by the backend."
-          );
-        }
-
-        // -------------------------------------------------
-        // RETURN TO DASHBOARD
-        // -------------------------------------------------
-
-        navigate("/");
-      } else {
-        alert(
-          data?.message ||
-            data?.error ||
-            "The statement could not be processed."
-        );
+      if (stored) {
+        setUser(JSON.parse(stored));
       }
-    } catch (error) {
-      console.error("Upload failed:", error);
-
-      alert(
-        `Upload failed.\n\n${error.message}`
+    } catch (err) {
+      console.error(
+        "USER READ ERROR:",
+        err
       );
-    } finally {
-      setIsProcessing(false);
     }
+  }, []);
+
+  const handleFileChange = (e) => {
+    setError("");
+    setMessage("");
+
+    const selectedFile =
+      e.target.files?.[0];
+
+    if (!selectedFile) {
+      setFile(null);
+      return;
+    }
+
+    const allowedTypes = [
+      "application/pdf",
+      "text/csv",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ];
+
+    const fileName =
+      selectedFile.name.toLowerCase();
+
+    const validExtension =
+      fileName.endsWith(".pdf") ||
+      fileName.endsWith(".csv") ||
+      fileName.endsWith(".xls") ||
+      fileName.endsWith(".xlsx");
+
+    if (
+      !allowedTypes.includes(
+        selectedFile.type
+      ) &&
+      !validExtension
+    ) {
+      setError(
+        "Please select a PDF, CSV, XLS or XLSX file."
+      );
+
+      setFile(null);
+      return;
+    }
+
+    setFile(selectedFile);
   };
 
-  // ===================================================
-  // UI
-  // ===================================================
+  const handleUpload = async () => {
+    setError("");
+    setMessage("");
+
+    if (!file) {
+      setError(
+        "Please select your bank statement first."
+      );
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      /*
+       * IMPORTANT:
+       * Do NOT manually set Content-Type here.
+       *
+       * Browser automatically creates:
+       * multipart/form-data; boundary=...
+       */
+
+      const formData =
+        new FormData();
+
+      formData.append("file", file);
+      // Compatibility with backends that expect "statement".
+      formData.append("statement", file);
+
+      if (pdfPassword.trim()) {
+        formData.append(
+          "password",
+          pdfPassword
+        );
+
+        // Some backends use pdf_password.
+        formData.append(
+          "pdf_password",
+          pdfPassword
+        );
+      }
+
+      const storedUser = localStorage.getItem("user");
+      if (storedUser) {
+        try {
+          const parsedUser = JSON.parse(storedUser);
+          const userId =
+            parsedUser?.id ??
+            parsedUser?.user_id ??
+            parsedUser?.userId;
+          if (userId) {
+            formData.append("user_id", String(userId));
+          }
+        } catch (e) {
+          console.warn("Could not read stored user:", e);
+        }
+      }
+
+      const response =
+        await fetch(
+          `${BACKEND_URL}/upload`,
+          {
+            method: "POST",
+
+            // ⭐ MOST IMPORTANT LINE
+            credentials: "include",
+
+            body: formData,
+          }
+        );
+
+      let data = {};
+
+      try {
+        data =
+          await response.json();
+      } catch (_) {
+        data = {};
+      }
+
+      console.log(
+        "UPLOAD RESPONSE:",
+        data
+      );
+
+      if (
+        response.status === 401
+      ) {
+        throw new Error(
+          "Authentication required. Please logout and login again."
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+            data.message ||
+            `Upload failed. HTTP ${response.status}`
+        );
+      }
+
+      if (!data.success) {
+        throw new Error(
+          data.error ||
+            data.message ||
+            "Upload failed."
+        );
+      }
+
+      setMessage(
+        data.message ||
+          "Statement uploaded successfully."
+      );
+
+      /*
+       * Backend may return imported
+       * transaction information.
+       */
+
+      if (
+        data.transactions ||
+        data.imported ||
+        data.count
+      ) {
+        const count =
+          data.count ??
+          data.imported ??
+          data.transactions?.length;
+
+        if (count !== undefined) {
+          setMessage(
+            `✅ Statement processed successfully. ${count} transactions imported.`
+          );
+        }
+      }
+
+      /*
+       * Clear file after successful upload.
+       */
+
+      setFile(null);
+      setPdfPassword("");
+
+      const fileInput =
+        document.getElementById(
+          "statement-file"
+        );
+
+      if (fileInput) {
+        fileInput.value = "";
+      }
+
+    } catch (err) {
+      console.error(
+        "UPLOAD ERROR:",
+        err
+      );
+
+      setError(
+        err.message ||
+          "Upload failed."
+      );
+
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div
       style={{
-        minHeight: "100vh",
-        background: "#0b0d0f",
-        padding: "40px 20px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        minHeight: "100%",
+        padding: "35px",
+        color: "#fff",
       }}
     >
+      {/* HEADER */}
+
       <div
         style={{
-          width: "100%",
-          maxWidth: "800px",
-          background: "#161a1f",
-          borderRadius: "20px",
-          padding: "40px",
-          border: "1px solid #242b35",
-          boxSizing: "border-box",
+          marginBottom: "25px",
         }}
       >
-        {/* HEADER */}
-
         <h1
           style={{
-            color: "#ff4500",
-            margin: "0 0 10px 0",
-            fontSize: "26px",
+            margin: 0,
+            fontSize: "32px",
+            fontWeight: "900",
+            color: "#F97316",
           }}
         >
           📄 Statement Importer
@@ -273,98 +285,183 @@ function ImportStatement({ setTransactions }) {
 
         <p
           style={{
-            color: "#9ca3af",
-            marginBottom: "30px",
+            color: "#94a3b8",
+            marginTop: "8px",
           }}
         >
-          Upload your bank statement to analyze your
-          transactions.
+          Upload your bank statement
+          to automatically analyze
+          your transactions.
         </p>
+      </div>
 
-        {/* FILE AREA */}
+      {/* USER */}
 
+      {user && (
         <div
           style={{
-            border: "2px dashed #374151",
-            padding: "40px 20px",
-            textAlign: "center",
-            background: "#1f262e",
+            background:
+              "rgba(13,148,136,0.08)",
+            border:
+              "1px solid rgba(13,148,136,0.25)",
             borderRadius: "12px",
+            padding: "12px 15px",
+            marginBottom: "20px",
+            color: "#cbd5e1",
+            fontSize: "13px",
+          }}
+        >
+          👤 Logged in as{" "}
+          <strong
+            style={{
+              color: "#14B8A6",
+            }}
+          >
+            {user.name ||
+              user.email ||
+              "User"}
+          </strong>
+        </div>
+      )}
+
+      {/* UPLOAD CARD */}
+
+      <div
+        style={{
+          background: "#161a1f",
+          border:
+            "1px solid #263244",
+          borderRadius: "18px",
+          padding: "30px",
+          maxWidth: "850px",
+        }}
+      >
+        {/* DROP AREA */}
+
+        <label
+          htmlFor="statement-file"
+          style={{
+            display: "block",
+            border:
+              "2px dashed #334155",
+            borderRadius: "15px",
+            padding: "45px 25px",
+            textAlign: "center",
+            cursor: "pointer",
+            background:
+              "#0B1420",
           }}
         >
           <div
             style={{
-              fontSize: "45px",
+              fontSize: "55px",
               marginBottom: "15px",
             }}
           >
-            📂
+            📁
           </div>
 
-          <h3
+          <h2
             style={{
-              color: "#ffffff",
-              marginBottom: "8px",
+              margin: 0,
+              color: "#fff",
             }}
           >
             Select Bank Statement
-          </h3>
+          </h2>
 
           <p
             style={{
-              color: "#9ca3af",
+              color: "#94a3b8",
               fontSize: "13px",
-              marginBottom: "20px",
             }}
           >
-            Supported formats: PDF, CSV, XLS, XLSX
+            Supported formats:
+            PDF, CSV, XLS, XLSX
           </p>
 
           <input
+            id="statement-file"
             type="file"
-            accept=".pdf,.csv,.xlsx,.xls"
-            onChange={(event) => {
-              const selectedFile =
-                event.target.files?.[0];
-
-              setFile(selectedFile || null);
-            }}
+            accept=".pdf,.csv,.xls,.xlsx"
+            onChange={
+              handleFileChange
+            }
             style={{
-              color: "#9ca3af",
-              cursor: "pointer",
-              maxWidth: "100%",
+              display: "none",
             }}
           />
 
-          {file && (
+          <div
+            style={{
+              display: "inline-block",
+              marginTop: "15px",
+              padding:
+                "10px 20px",
+              borderRadius: "8px",
+              background: "#0D9488",
+              color: "#fff",
+              fontWeight: "700",
+              fontSize: "13px",
+            }}
+          >
+            Choose File
+          </div>
+        </label>
+
+        {/* SELECTED FILE */}
+
+        {file && (
+          <div
+            style={{
+              marginTop: "18px",
+              padding: "14px",
+              borderRadius: "10px",
+              background:
+                "rgba(13,148,136,0.1)",
+              border:
+                "1px solid rgba(13,148,136,0.3)",
+            }}
+          >
             <div
               style={{
-                marginTop: "20px",
-                padding: "12px",
-                background: "#11161b",
-                borderRadius: "8px",
-                color: "#10b981",
-                fontSize: "14px",
+                color: "#14B8A6",
+                fontWeight: "700",
               }}
             >
-              ✅ Selected: {file.name}
+              📄 {file.name}
             </div>
-          )}
-        </div>
+
+            <div
+              style={{
+                color: "#64748b",
+                fontSize: "12px",
+                marginTop: "4px",
+              }}
+            >
+              {(
+                file.size /
+                1024 /
+                1024
+              ).toFixed(2)}{" "}
+              MB
+            </div>
+          </div>
+        )}
 
         {/* PASSWORD */}
 
         <div
           style={{
-            marginTop: "20px",
+            marginTop: "22px",
           }}
         >
           <label
             style={{
               display: "block",
-              color: "#d1d5db",
+              color: "#cbd5e1",
               fontSize: "13px",
-              marginBottom: "8px",
+              marginBottom: "7px",
             }}
           >
             PDF Password
@@ -372,76 +469,123 @@ function ImportStatement({ setTransactions }) {
 
           <input
             type="password"
-            name="pdf-statement-password"
-            autoComplete="new-password"
-            data-lpignore="true"
-            data-1p-ignore="true"
-            placeholder="Enter PDF password (optional)"
-            value={password}
-            onChange={(event) =>
-              setPassword(event.target.value)
+            value={pdfPassword}
+            onChange={(e) =>
+              setPdfPassword(
+                e.target.value
+              )
             }
+            placeholder="Enter PDF password (optional)"
+            autoComplete="off"
             style={{
               width: "100%",
-              padding: "12px",
-              borderRadius: "8px",
-              background: "#1f262e",
-              color: "#ffffff",
-              border: "1px solid #374151",
-              boxSizing: "border-box",
+              boxSizing:
+                "border-box",
+              padding: "13px",
+              borderRadius: "9px",
+              border:
+                "1px solid #334155",
+              background:
+                "#0B1420",
+              color: "#fff",
               outline: "none",
             }}
           />
         </div>
 
+        {/* ERROR */}
+
+        {error && (
+          <div
+            style={{
+              marginTop: "18px",
+              padding: "13px",
+              borderRadius: "10px",
+              background:
+                "rgba(239,68,68,0.1)",
+              border:
+                "1px solid rgba(239,68,68,0.35)",
+              color: "#fca5a5",
+              fontSize: "13px",
+            }}
+          >
+            ⚠️ {error}
+          </div>
+        )}
+
+        {/* SUCCESS */}
+
+        {message && (
+          <div
+            style={{
+              marginTop: "18px",
+              padding: "13px",
+              borderRadius: "10px",
+              background:
+                "rgba(16,185,129,0.1)",
+              border:
+                "1px solid rgba(16,185,129,0.35)",
+              color: "#6ee7b7",
+              fontSize: "13px",
+            }}
+          >
+            {message}
+          </div>
+        )}
+
         {/* UPLOAD BUTTON */}
 
         <button
           onClick={handleUpload}
-          disabled={isProcessing || !file}
+          disabled={
+            loading || !file
+          }
           style={{
             width: "100%",
-            marginTop: "30px",
-            padding: "14px",
+            marginTop: "22px",
+            padding: "15px",
             border: "none",
             borderRadius: "10px",
             background:
-              isProcessing || !file
-                ? "#4b5563"
-                : "#ff4500",
-            color: "#ffffff",
-            fontWeight: "700",
+              loading || !file
+                ? "#334155"
+                : "linear-gradient(90deg,#0D9488,#06B6D4)",
+            color: "#fff",
+            fontSize: "15px",
+            fontWeight: "800",
             cursor:
-              isProcessing || !file
+              loading || !file
                 ? "not-allowed"
                 : "pointer",
           }}
         >
-          {isProcessing
+          {loading
             ? "⏳ Processing Statement..."
-            : "🚀 Upload and Analyze Statement"}
+            : "🚀 Process Statement"}
         </button>
 
-        {/* BACK BUTTON */}
+        {/* BACK */}
 
         <button
-          onClick={() => navigate("/")}
-          disabled={isProcessing}
+          onClick={() =>
+            navigate("/")
+          }
           style={{
             width: "100%",
             marginTop: "12px",
             padding: "12px",
-            border: "1px solid #374151",
+            border:
+              "1px solid #263244",
             borderRadius: "10px",
-            background: "transparent",
-            color: "#9ca3af",
-            fontWeight: "600",
+            background:
+              "transparent",
+            color: "#94a3b8",
             cursor: "pointer",
           }}
         >
           ← Back to Dashboard
         </button>
-      </div>
+      </div> 
     </div>
   );
 }

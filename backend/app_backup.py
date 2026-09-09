@@ -150,23 +150,6 @@ def get_connection():
 
 
 # ============================================================
-# AUTHENTICATED USER HELPER
-# ============================================================
-# Authorization always uses the server-side Flask session.
-# A user_id supplied by the browser is never trusted.
-def get_authenticated_user_id():
-    user_id = get_authenticated_user_id()
-
-    if user_id is None or str(user_id).strip() == "":
-        return None
-
-    try:
-        return int(user_id)
-    except (TypeError, ValueError):
-        return None
-
-
-# ============================================================
 # BLUEPRINT IMPORTS
 # ============================================================
 
@@ -925,7 +908,9 @@ def notifications():
 )
 def mark_all_notifications_read():
 
-    user_id = get_authenticated_user_id()
+    user_id = session.get(
+        "user_id"
+    )
 
     if not user_id:
 
@@ -1014,7 +999,9 @@ def mark_notification_read(
     notification_id
 ):
 
-    user_id = get_authenticated_user_id()
+    user_id = session.get(
+        "user_id"
+    )
 
     if not user_id:
 
@@ -1599,25 +1586,48 @@ def session_check():
 )
 def debug_session():
 
-    user_id = get_authenticated_user_id()
-
     return jsonify({
-        "success": True,
-        "authenticated": user_id is not None,
-        "user_id": user_id,
-        "user_name": session.get("user_name"),
-        "user_email": session.get("user_email"),
-        "cookie_name": app.config.get("SESSION_COOKIE_NAME"),
-        "cookie_secure": app.config.get("SESSION_COOKIE_SECURE"),
-        "cookie_samesite": app.config.get("SESSION_COOKIE_SAMESITE"),
-        # Safe diagnostics; cookie VALUE is never returned.
-        "request_host": request.host,
-        "request_origin": request.headers.get("Origin"),
-        "cookie_present": bool(
-            request.cookies.get(
-                app.config.get("SESSION_COOKIE_NAME")
-            )
-        ),
+
+        "success":
+            True,
+
+        "authenticated":
+            bool(
+                session.get(
+                    "user_id"
+                )
+            ),
+
+        "user_id":
+            session.get(
+                "user_id"
+            ),
+
+        "user_name":
+            session.get(
+                "user_name"
+            ),
+
+        "user_email":
+            session.get(
+                "user_email"
+            ),
+
+        "cookie_name":
+            app.config[
+                "SESSION_COOKIE_NAME"
+            ],
+
+        "cookie_secure":
+            app.config[
+                "SESSION_COOKIE_SECURE"
+            ],
+
+        "cookie_samesite":
+            app.config[
+                "SESSION_COOKIE_SAMESITE"
+            ],
+
     })
 
 

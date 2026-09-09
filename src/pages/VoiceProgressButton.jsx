@@ -1,1489 +1,2076 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
-// =========================================================
-// API & NETWORK CONFIGURATION
-// Live backend + authenticated Flask session
-// =========================================================
-// Keep the backend URL in one place.
-// If your Vite proxy is configured, you can set VITE_API_URL="" and
-// use relative URLs instead.
-const API_URL =
-  import.meta.env.VITE_API_URL?.trim() ||
-  "http://127.0.0.1:5000";
+/*
+  AmiVest Alexa AI - WORKABLE VERSION
 
-async function apiCall(path, options = {}) {
-  const method = (options.method || "GET").toUpperCase();
+  Main fixes:
+  1. Text chat works even when /chat returns 401.
+  2. Credentials are included for Flask session authentication.
+  3. HTTP errors are handled correctly instead of pretending "Done".
+  4. Hello / Hindi / English basic conversation works locally.
+  5. Browser speech uses a fresh SpeechSynthesisUtterance for every response.
+  6. Voice input displays live words while speaking.
+  7. Voice output speaks the final response in Hindi or English.
+  8. Existing goal/transaction/budget voice commands call the backend.
+  9. Delete commands require an exact target when possible.
+  10. UI never remains stuck on "Speaking".
+  11. Voice input requests microphone permission before recognition.
+  12. Live speech appears in the input while the user is talking.
+  13. Final voice text is sent only once to the assistant.
+  14. Hindi/English recognition follows the selected language.
+  15. Microphone errors show actionable messages instead of silently failing.
+*/
 
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    method,
-    credentials: "include", // IMPORTANT: sends the logged-in Flask session
-    headers: {
-      ...(method !== "GET" ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers || {}),
-    },
-  });
+const DEFAULT_API_BASE = "http://127.0.0.1:5000";
+const API_BASE = String(import.meta.env.VITE_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
 
-  let body = {};
-  try {
-    body = await response.json();
-  } catch (_) {
-    body = {};
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      body?.message ||
-      body?.error ||
-      `Request failed with HTTP ${response.status}`
-    );
-  }
-
-  return body;
-}
-
-// Always read the current user's data from the server.
-// Never send/assume a user_id from the browser.
-async function getCurrentUser() {
-  const session = await apiCall("/session");
-  if (!session?.authenticated || !session?.user?.id) {
-    throw new Error("Not authenticated. Please log in again.");
-  }
-  return session.user;
-}
-
-async function getLiveFinancialContext() {
-  const result = {
-    user: null,
-    progress: null,
-    goals: [],
-    dashboard: null,
-  };
-
-  const user = await getCurrentUser();
-  result.user = user;
-
-  const userId = encodeURIComponent(user.id);
-
-  const [progressResult, goalsResult, dashboardResult] =
-    await Promise.allSettled([
-      apiCall(`/progress/summary?user_id=${userId}`),
-      apiCall(`/goals?user_id=${userId}`),
-      apiCall(`/dashboard?user_id=${userId}`),
-    ]);
-
-  if (progressResult.status === "fulfilled") {
-    result.progress = progressResult.value;
-  }
-
-  if (goalsResult.status === "fulfilled") {
-    const value = goalsResult.value;
-    result.goals = Array.isArray(value?.goals)
-      ? value.goals
-      : Array.isArray(value)
-      ? value
-      : [];
-  }
-
-  if (dashboardResult.status === "fulfilled") {
-    result.dashboard = dashboardResult.value;
-  }
-
-  return result;
-}
-
-function formatLiveContext(context) {
-  const goals = (context.goals || []).map((g) => ({
-    id: g.id,
-    name: g.goal_name ?? g.name,
-    target: Number(g.target_amount ?? 0),
-    saved: Number(g.current_saved ?? g.saved_amount ?? 0),
-    status: g.status,
-  }));
-
-  return {
-    user: context.user
-      ? {
-          id: context.user.id,
-          name: context.user.name,
-          email: context.user.email,
-        }
-      : null,
-    dashboard: context.dashboard,
-    progress: context.progress,
-    goals,
-  };
-}
-
-function levenshteinDistance(a, b) {
-  const matrix = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
-  for (let i = 0; i <= a.length; i++) matrix[i][0] = i;
-  for (let j = 0; j <= b.length; j++) matrix[0][j] = j;
-
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,
-        matrix[i][j - 1] + 1,
-        matrix[i - 1][j - 1] + cost
-      );
-    }
-  }
-  return matrix[a.length][b.length];
-}
-
-const WAKE_TARGETS = [
-  "amivest", "ami", "amivest ai", "hey amivest", "namaste amivest",
-  "alexa", "hey alexa", "saathi", "sathi", "saathy", "siri", "gemini"
+const WAKE_WORDS = [
+  "suno",
+  "sunoo",
+  "sunno",
+  "hey suno",
+  "amivest",
+  "alexa",
+  "saathi",
 ];
 
-function isFuzzyWakeWordMatch(transcript) {
-  const words = transcript.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/);
-  for (const word of words) {
-    if (word.length < 3) continue;
-    for (const target of WAKE_TARGETS) {
-      if (word === target) return { matched: true, wakeWord: word };
-      const dist = levenshteinDistance(word, target);
-      if (dist <= 1 || (word.length >= 5 && dist <= 2)) {
-        return { matched: true, wakeWord: word };
-      }
-    }
-  }
-  return { matched: false, wakeWord: null };
+const QUICK_ACTIONS = [
+  { id: "goals", icon: "🎯", label: "Goals", command: "Show my goals" },
+  { id: "transactions", icon: "💳", label: "Transactions", command: "Show my recent transactions" },
+  { id: "budget", icon: "📊", label: "Budget", command: "Show my monthly budget" },
+  { id: "food", icon: "🍔", label: "Add ₹500 food", command: "Add 500 in food" },
+  { id: "savings", icon: "💰", label: "Savings", command: "How much should I save this month?" },
+  { id: "investments", icon: "📈", label: "Investments", command: "Show my investments" },
+  { id: "loans", icon: "🏦", label: "Loans", command: "Show my loans" },
+];
+
+function safeText(value) {
+  if (value === null || value === undefined) return "";
+  return String(value);
 }
 
-const NUMBER_WORDS_MAP = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
-  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
-  hundred: 100, thousand: 1000, lakh: 100000, lakhs: 100000, crore: 10000000, crores: 10000000,
-  ek: 1, do: 2, teen: 3, chaar: 4, paanch: 5, che: 6, saat: 7, aath: 8, nau: 9, das: 10,
-  gyarah: 11, barah: 12, terah: 13, chaudah: 14, pandrah: 15, solah: 16, satrah: 17, atharah: 18, unnees: 19, bees: 20,
-  tees: 30, chalees: 40, pachaas: 50, saath: 60, sattar: 70, assi: 80, nabbe: 90,
-  sau: 100, hazar: 1000, hazara: 1000, k: 1000,
-};
-
-function normalizeSpokenText(text) {
-  if (!text) return "";
-  let normalized = text.toLowerCase().trim();
-
-  normalized = normalized.replace(/\b(rupees|rupee|rs\.?|rupaye|rupay|rupiya)\b/gi, "₹");
-  normalized = normalized.replace(/\b(paanch hazar|five thousand)\b/gi, "5000");
-  normalized = normalized.replace(/\b(das hazar|ten thousand)\b/gi, "10000");
-  normalized = normalized.replace(/\b(bees hazar|twenty thousand)\b/gi, "20000");
-  normalized = normalized.replace(/\b(pachaas hazar|fifty thousand)\b/gi, "50000");
-  normalized = normalized.replace(/\b(ek lakh|one lakh|1 lakh)\b/gi, "100000");
-
-  const tokens = normalized.split(/\s+/);
-  const resultTokens = [];
-  let currentNum = 0;
-  let hasNum = false;
-
-  for (let token of tokens) {
-    const cleanToken = token.replace(/[^a-z]/gi, "");
-    if (NUMBER_WORDS_MAP[cleanToken] !== undefined) {
-      const val = NUMBER_WORDS_MAP[cleanToken];
-      if (val >= 100) {
-        currentNum = (currentNum || 1) * val;
-      } else {
-        currentNum += val;
-      }
-      hasNum = true;
-    } else {
-      if (hasNum) {
-        resultTokens.push(currentNum.toString());
-        currentNum = 0;
-        hasNum = false;
-      }
-      resultTokens.push(token);
-    }
-  }
-  if (hasNum) {
-    resultTokens.push(currentNum.toString());
-  }
-
-  return resultTokens.join(" ");
+function cleanSpeechText(value) {
+  return safeText(value)
+    .replace(/\*\*/g, "")
+    .replace(/__/g, "")
+    .replace(/`/g, "")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/₹/g, " rupees ")
+    .replace(/\bRs\.?\s*/gi, " rupees ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function parseLocalIntents(rawText) {
-  const normalized = normalizeSpokenText(rawText);
-  const lower = normalized.toLowerCase();
-
-  // 1. Language Toggle Intents
-  if (/\bhindi\b/.test(lower) && /(switch|speak|talk|change|bolo|mein baat|baat karo|mode)/.test(lower)) {
-    return { type: "SET_LANG", lang: "hi" };
-  }
-  if (/\benglish\b/.test(lower) && /(switch|speak|talk|change|mode)/.test(lower)) {
-    return { type: "SET_LANG", lang: "en" };
-  }
-
-  // 2. Morning Briefing / Daily Summary Skill
-  if (/(good morning|briefing|daily summary|morning update|aaj ka update|shubh prabhat)/.test(lower)) {
-    return { type: "GET_BRIEFING" };
-  }
-
-  // 3. Goal Savings Intent
-  const addMatch =
-    lower.match(/(?:add|put|transfer|save|deposit)\s*(?:₹|rs\.?|rupees)?\s*([\d,]+)\s*(?:rupees)?\s*(?:to|toward|into|in|mein)\s*(?:my\s*)?(.+)/i) ||
-    lower.match(/(?:₹|rs\.?)?\s*([\d,]+)\s*(?:rupees|rupaye)?\s*(.+?)\s*(?:mein|me|to)\s*(?:add|save|deposit|daal|dalo)/i);
-
-  if (addMatch) {
-    const amountStr = addMatch[1] || addMatch[2];
-    const goalQueryStr = addMatch[1] === amountStr ? addMatch[2] : addMatch[1];
-    const amount = parseInt(amountStr.replace(/,/g, ""), 10);
-    const goalQuery = goalQueryStr ? goalQueryStr.replace(/\b(goal|me|mein|fund)\b/gi, "").trim() : "";
-
-    if (amount && goalQuery) {
-      return { type: "ADD_GOAL_MONEY", amount, goalQuery };
-    }
-  }
-
-  // 4. Financial Progress Query
-  if (/(my progress|financial status|summary|balance|how am i doing|kaisa chal raha|meri progress|kya status hai|mera kitna bachat hai|budget status)/.test(lower)) {
-    return { type: "GET_PROGRESS" };
-  }
-
-  // 5. Investment Advice Skill
-  if (/(invest|investment|sip|mutual fund|kahan invest karun|kahan paise lagayein|where to invest)/.test(lower)) {
-    return { type: "GET_INVESTMENT_ADVICE" };
-  }
-
-  // 6. Category Expense Inquiry (e.g., "Swiggy par kitna kharcha hua", "food expense")
-  const categoryMatch = lower.match(/(?:how much|kitna|kitne)\s*(?:did i spend|kharcha|spent)\s*(?:on|par|in)?\s*(.+)/i);
-  if (categoryMatch && categoryMatch[1]) {
-    const categoryQuery = categoryMatch[1].replace(/\b(hua|hai|money|rupees)\b/gi, "").trim();
-    if (categoryQuery.length > 2) {
-      return { type: "GET_CATEGORY_SPEND", categoryQuery };
-    }
-  }
-
-  return null;
+function detectLanguage(text, selected = "hi") {
+  const value = safeText(text);
+  if (/[\u0900-\u097f]/.test(value)) return "hi";
+  return selected === "en" ? "en" : "hi";
 }
 
-const FOLLOW_UP_WINDOW_MS = 10000;
-const VAD_SILENCE_TIMEOUT_MS = 1400;
+/* ------------------------------------------------------------------ */
+/* Reliable browser TTS                                               */
+/* ------------------------------------------------------------------ */
 
-function playAudioChime(type = "wake") {
+function stopBrowserSpeech() {
   try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-
-    if (type === "wake") {
-      // Alexa / Siri Style Gentle Dual Ring Chime
-      const osc1 = ctx.createOscillator();
-      const osc2 = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc1.type = "sine";
-      osc2.type = "sine";
-
-      osc1.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
-      osc1.frequency.exponentialRampToValueAtTime(880.00, ctx.currentTime + 0.16); // A5
-
-      osc2.frequency.setValueAtTime(739.99, ctx.currentTime); // F#5
-      osc2.frequency.exponentialRampToValueAtTime(1174.66, ctx.currentTime + 0.16); // D6
-
-      gain.gain.setValueAtTime(0.20, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.32);
-
-      osc1.connect(gain);
-      osc2.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc1.start();
-      osc2.start();
-      osc1.stop(ctx.currentTime + 0.32);
-      osc2.stop(ctx.currentTime + 0.32);
-    } else if (type === "confirm") {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(987.77, ctx.currentTime); // B5
-      gain.gain.setValueAtTime(0.12, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.18);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.18);
-    } else if (type === "error") {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sawtooth";
-      osc.frequency.setValueAtTime(293.66, ctx.currentTime);
-      osc.frequency.setValueAtTime(220.00, ctx.currentTime + 0.12);
-      gain.gain.setValueAtTime(0.10, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.30);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.30);
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.resume();
     }
   } catch (_) {}
 }
 
-function MultiModeVisualizer({ state, visualMode = "alexa", audioLevel = 0, frequencyData = [] }) {
-  const canvasRef = useRef(null);
+function chooseVoice(language) {
+  if (!("speechSynthesis" in window)) return null;
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    let animationId;
-    let step = 0;
+  const voices = window.speechSynthesis.getVoices() || [];
+  if (!voices.length) return null;
 
-    const render = () => {
-      step += 0.05;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      const isListening = state === "listening" || state === "awaiting-question";
-      const isProcessing = state === "processing";
-      const isSpeaking = state === "speaking";
-
-      const boost = isListening || isSpeaking ? audioLevel * 30 : 0;
-
-      if (visualMode === "alexa") {
-        // Alexa Glowing Cyan/Blue Light Ring
-        const ringRadius = 26 + boost * 0.4;
-        
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, ringRadius, 0, Math.PI * 2);
-        ctx.strokeStyle = isListening 
-          ? "#00E5FF" 
-          : isSpeaking 
-          ? "#10B981" 
-          : isProcessing 
-          ? "#F59E0B" 
-          : "#0284C7";
-        ctx.lineWidth = 6 + boost * 0.3;
-        ctx.shadowColor = isListening ? "#00E5FF" : isSpeaking ? "#10B981" : "#0284C7";
-        ctx.shadowBlur = 15;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-
-        // Rotating Cyan Accent Pulse
-        const angle = step * 3;
-        const pulseX = centerX + Math.cos(angle) * ringRadius;
-        const pulseY = centerY + Math.sin(angle) * ringRadius;
-        ctx.beginPath();
-        ctx.arc(pulseX, pulseY, 5 + boost * 0.2, 0, Math.PI * 2);
-        ctx.fillStyle = "#FFFFFF";
-        ctx.fill();
-
-      } else if (visualMode === "siri") {
-        // Siri Multi-layered RGB Fluid Orb
-        const baseRadius = 22 + boost;
-        const ringCount = 4;
-        const colors = isSpeaking
-          ? ["rgba(16, 185, 129, 0.8)", "rgba(59, 130, 246, 0.7)", "rgba(139, 92, 246, 0.6)", "rgba(6, 182, 212, 0.4)"]
-          : isListening
-          ? ["rgba(236, 72, 153, 0.85)", "rgba(139, 92, 246, 0.75)", "rgba(6, 182, 212, 0.65)", "rgba(244, 63, 94, 0.4)"]
-          : isProcessing
-          ? ["rgba(245, 158, 11, 0.85)", "rgba(239, 68, 68, 0.75)", "rgba(217, 119, 6, 0.65)", "rgba(251, 191, 36, 0.4)"]
-          : ["rgba(13, 148, 136, 0.45)", "rgba(30, 58, 95, 0.35)", "rgba(16, 185, 129, 0.25)", "rgba(148, 163, 184, 0.15)"];
-
-        for (let r = 0; r < ringCount; r++) {
-          ctx.beginPath();
-          const points = 20;
-          for (let i = 0; i <= points; i++) {
-            const a = (i / points) * Math.PI * 2;
-            const wave = Math.sin(a * 4 + step * (r + 2)) * (isListening || isSpeaking ? 5 + boost * 0.4 : 1.5);
-            const rad = baseRadius + r * 3.5 + wave;
-            const x = centerX + Math.cos(a) * rad;
-            const y = centerY + Math.sin(a) * rad;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          }
-          ctx.closePath();
-          ctx.fillStyle = colors[r % colors.length];
-          ctx.fill();
-        }
-
-        // Center Nucleus
-        ctx.beginPath();
-        ctx.arc(centerX, centerY, 14, 0, Math.PI * 2);
-        const grad = ctx.createRadialGradient(centerX, centerY, 1, centerX, centerY, 14);
-        grad.addColorStop(0, "#FFFFFF");
-        grad.addColorStop(1, isSpeaking ? "#10B981" : isListening ? "#EC4899" : "#0D9488");
-        ctx.fillStyle = grad;
-        ctx.fill();
-
-      } else {
-        // Audio Waveform Spectrum
-        const barWidth = 4;
-        const barGap = 3;
-        const totalBars = 10;
-        const startX = centerX - ((totalBars * (barWidth + barGap)) / 2);
-
-        for (let i = 0; i < totalBars; i++) {
-          const freq = frequencyData && frequencyData.length > i ? frequencyData[i] / 255 : 0.2;
-          const barHeight = (isListening || isSpeaking ? freq * 36 : 6) + Math.sin(step * 3 + i) * 3;
-          const x = startX + i * (barWidth + barGap);
-          const y = centerY - barHeight / 2;
-
-          ctx.fillStyle = isListening ? "#00E5FF" : isSpeaking ? "#10B981" : "#0D9488";
-          ctx.fillRect(x, y, barWidth, Math.max(4, barHeight));
-        }
-      }
-
-      animationId = requestAnimationFrame(render);
-    };
-
-    render();
-    return () => cancelAnimationFrame(animationId);
-  }, [state, visualMode, audioLevel, frequencyData]);
+  if (language === "hi") {
+    return (
+      voices.find((v) => /^hi[-_]/i.test(v.lang)) ||
+      voices.find((v) => String(v.lang).toLowerCase().includes("hi")) ||
+      voices.find((v) => /hindi/i.test(v.name)) ||
+      voices.find((v) => /en[-_]in/i.test(v.lang)) ||
+      null
+    );
+  }
 
   return (
-    <div style={{ position: "relative", width: "68px", height: "68px", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <canvas ref={canvasRef} width={96} height={96} style={{ width: "68px", height: "68px" }} />
-    </div>
+    voices.find((v) => /en[-_]in/i.test(v.lang)) ||
+    voices.find((v) => /en[-_]us/i.test(v.lang)) ||
+    voices.find((v) => /^en/i.test(v.lang)) ||
+    null
   );
 }
 
-export default function AdvancedAlexaAssistant() {
-  const [lang, setLang] = useState("auto"); // 'auto' | 'en' | 'hi'
-  const [state, setState] = useState("idle"); // idle | listening | awaiting-question | processing | speaking | error
-  const [visualMode, setVisualMode] = useState("alexa"); // 'alexa' | 'siri' | 'spectrum'
-  const [wakeWordOn, setWakeWordOn] = useState(false);
-  const [liveInterim, setLiveInterim] = useState("");
-  const [lastUserSpeech, setLastUserSpeech] = useState("");
-  const [lastAiReply, setLastAiReply] = useState("");
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const [frequencyData, setFrequencyData] = useState([]);
-  const [speechSpeed, setSpeechSpeed] = useState(1.05);
+function splitSpeech(text) {
+  const clean = cleanSpeechText(text);
+  if (!clean) return [];
 
-  const recognitionRef = useRef(null);
-  const wakeWordOnRef = useRef(false);
-  const awaitingRef = useRef(false);
-  const speakingRef = useRef(false);
-  const followUpTimerRef = useRef(null);
-  const vadSilenceTimerRef = useRef(null);
-  const watchdogIntervalRef = useRef(null);
-  const audioCtxRef = useRef(null);
-  const analyserRef = useRef(null);
-  const micStreamRef = useRef(null);
-  const animFrameRef = useRef(null);
+  const sentences = clean
+    .replace(/\n+/g, ". ")
+    .split(/(?<=[.!?।])\s+/)
+    .filter(Boolean);
 
-  const speakRef = useRef(null);
-  const openFollowUpRef = useRef(null);
-  const handleUtteranceRef = useRef(null);
-  const startListeningRef = useRef(null);
+  const chunks = [];
 
-  const speechSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-
-  useEffect(() => {
-    wakeWordOnRef.current = wakeWordOn;
-  }, [wakeWordOn]);
-
-  useEffect(() => {
-    const savedLang = localStorage.getItem("amivest_voice_lang") || "auto";
-    const savedVis = localStorage.getItem("amivest_voice_vis") || "alexa";
-    setLang(savedLang);
-    setVisualMode(savedVis);
-
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+  for (const sentence of sentences) {
+    if (sentence.length <= 160) {
+      chunks.push(sentence);
+      continue;
     }
-  }, []);
 
-  const changeLang = (newLang) => {
-    setLang(newLang);
-    localStorage.setItem("amivest_voice_lang", newLang);
+    const words = sentence.split(/\s+/);
+    let current = "";
+
+    for (const word of words) {
+      if ((current + " " + word).trim().length > 150) {
+        if (current.trim()) chunks.push(current.trim());
+        current = word;
+      } else {
+        current = (current + " " + word).trim();
+      }
+    }
+
+    if (current.trim()) chunks.push(current.trim());
+  }
+
+  return chunks;
+}
+
+function normalizeSpeechChunk(text) {
+  return safeText(text)
+    .replace(/^[\s\u200B-\u200D\uFEFF]+/g, "")
+    .replace(/^(?:[^\p{L}\p{N}\u0900-\u097F]+)+/u, "")
+    .replace(/^[₹$€£¥]+\s*/g, "")
+    .trim();
+}
+
+/*
+ * Safari-safe TTS priming.
+ *
+ * Safari can reject speech started only after an async fetch. We therefore
+ * create a tiny silent utterance directly from the user's click/submit event.
+ * The real response is still spoken later.
+ */
+function primeSafariSpeech() {
+  if (
+    typeof window === "undefined" ||
+    !("speechSynthesis" in window) ||
+    typeof window.SpeechSynthesisUtterance === "undefined"
+  ) {
+    return false;
+  }
+
+  try {
+    const synth = window.speechSynthesis;
+    synth.cancel();
+    synth.resume();
+
+    const primer = new SpeechSynthesisUtterance(" ");
+    primer.volume = 0;
+    primer.rate = 10;
+    primer.pitch = 1;
+    primer.lang = "en-IN";
+
+    synth.speak(primer);
+
+    setTimeout(() => {
+      try {
+        synth.cancel();
+        synth.resume();
+      } catch (_) {}
+    }, 40);
+
+    return true;
+  } catch (error) {
+    console.warn("Safari speech prime failed:", error);
+    return false;
+  }
+}
+
+function speakText(text, language, onStart, onEnd, onError) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    onError?.("Your browser does not support text-to-speech.");
+    onEnd?.();
+    return;
+  }
+
+  const clean = cleanSpeechText(text);
+  if (!clean) {
+    onEnd?.();
+    return;
+  }
+
+  const synth = window.speechSynthesis;
+
+  try {
+    synth.resume();
+  } catch (_) {}
+  const chunks = splitSpeech(clean)
+    .map(normalizeSpeechChunk)
+    .filter(Boolean);
+
+  if (!chunks.length) {
+    onEnd?.();
+    return;
+  }
+
+  let index = 0;
+  let finished = false;
+  let started = false;
+  let currentRetry = 0;
+  let watchdog = null;
+  let keepAlive = null;
+
+  const clearTimers = () => {
+    if (watchdog) {
+      clearTimeout(watchdog);
+      watchdog = null;
+    }
+    if (keepAlive) {
+      clearInterval(keepAlive);
+      keepAlive = null;
+    }
   };
 
-  const changeVisualMode = (mode) => {
-    setVisualMode(mode);
-    localStorage.setItem("amivest_voice_vis", mode);
+  const finish = (errorMessage = "") => {
+    if (finished) return;
+    finished = true;
+    clearTimers();
+    if (errorMessage) onError?.(errorMessage);
+    onEnd?.();
   };
 
-  const startMicAnalyzer = useCallback(async () => {
+  const skipCurrentChunk = () => {
+    if (finished) return;
+    clearTimers();
+    currentRetry = 0;
+    index += 1;
+    setTimeout(() => {
+      if (!finished) speakNext();
+    }, 90);
+  };
+
+  const speakNext = () => {
+    if (finished) return;
+
+    if (index >= chunks.length) {
+      finish();
+      return;
+    }
+
+    const part = normalizeSpeechChunk(chunks[index]);
+
+    if (!part) {
+      skipCurrentChunk();
+      return;
+    }
+
+    const detected = detectLanguage(part, language);
+    const lang = detected === "hi" ? "hi-IN" : "en-IN";
+
     try {
-      if (micStreamRef.current) return;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-          sampleRate: 48000,
-        },
-      });
-      micStreamRef.current = stream;
-
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new AudioCtx();
-      audioCtxRef.current = ctx;
-
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 64;
-      analyser.smoothingTimeConstant = 0.75;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-      const updateLevel = () => {
-        if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
-        setFrequencyData(Array.from(dataArray));
-
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          sum += dataArray[i];
-        }
-        const avg = sum / dataArray.length;
-        setAudioLevel(Math.min(1.0, avg / 110));
-        animFrameRef.current = requestAnimationFrame(updateLevel);
-      };
-
-      updateLevel();
+      if (synth.paused) synth.resume();
+      else if (synth.speaking) synth.cancel();
     } catch (_) {}
-  }, []);
 
-  const stopMicAnalyzer = useCallback(() => {
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach((t) => t.stop());
-      micStreamRef.current = null;
-    }
-    if (audioCtxRef.current) {
-      audioCtxRef.current.close();
-      audioCtxRef.current = null;
-    }
-    analyserRef.current = null;
-    setAudioLevel(0);
-    setFrequencyData([]);
-  }, []);
+    const utterance = new SpeechSynthesisUtterance(part);
+    utterance.lang = lang;
+    utterance.rate = detected === "hi" ? 0.90 : 0.96;
+    utterance.pitch = 1;
+    utterance.volume = 1;
 
-  const speak = useCallback((text, onComplete) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) {
-      if (onComplete) onComplete();
-      return;
+    // First attempt uses the best installed voice.
+    // Retry intentionally removes the selected voice.
+    if (currentRetry === 0) {
+      const voice = chooseVoice(detected);
+      if (voice) utterance.voice = voice;
     }
 
-    window.speechSynthesis.cancel();
-    const cleanText = text.replace(/[*`#_~]/g, "").trim();
+    let hasStarted = false;
 
-    if (!cleanText) {
-      if (onComplete) onComplete();
-      setState("idle");
-      return;
-    }
+    utterance.onstart = () => {
+      hasStarted = true;
 
-    speakingRef.current = true;
-    setState("speaking");
-    setLastAiReply(cleanText);
+      if (!started) {
+        started = true;
+        onStart?.();
+      }
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    const voices = window.speechSynthesis.getVoices();
-
-    const isHindiText =
-      lang === "hi" ||
-      /[\u0900-\u097F]/.test(cleanText) ||
-      /\b(main|aap|hai|hoon|bhi|kar|sakte|ho|hai|ka|ke|ki|aur|kya|rupaye|hazar|batao|karo|prabhat)\b/i.test(cleanText);
-
-    if (voices.length > 0) {
-      const selectedVoice = isHindiText
-        ? voices.find((v) => v.lang.includes("hi-IN") || v.lang.includes("hi") || v.name.includes("Hindi"))
-        : voices.find((v) => v.lang.includes("en-IN") || v.lang.includes("en-US") || v.lang.includes("en-GB") || v.lang.includes("en"));
-
-      if (selectedVoice) utterance.voice = selectedVoice;
-    }
-
-    utterance.lang = isHindiText ? "hi-IN" : "en-US";
-    utterance.pitch = 1.05;
-    utterance.rate = speechSpeed;
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
+    };
 
     utterance.onend = () => {
-      speakingRef.current = false;
-      if (onComplete) onComplete();
-      if (openFollowUpRef.current) openFollowUpRef.current();
-    };
+      if (finished) return;
 
-    utterance.onerror = () => {
-      speakingRef.current = false;
-      setState("idle");
-      if (wakeWordOnRef.current && startListeningRef.current) {
-        startListeningRef.current();
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = null;
       }
+
+      currentRetry = 0;
+      index += 1;
+
+      setTimeout(() => {
+        if (!finished) speakNext();
+      }, 70);
     };
 
-    window.speechSynthesis.speak(utterance);
-    if (window.speechSynthesis.paused) window.speechSynthesis.resume();
-  }, [lang, speechSpeed]);
+    utterance.onerror = (event) => {
+      if (finished) return;
 
-  useEffect(() => {
-    speakRef.current = speak;
-  }, [speak]);
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
 
-  const finishFollowUpWindow = useCallback(() => {
-    awaitingRef.current = false;
-    clearTimeout(vadSilenceTimerRef.current);
-    setLiveInterim("");
-    stopMicAnalyzer();
-    if (wakeWordOnRef.current && startListeningRef.current) {
-      startListeningRef.current();
-    } else {
-      setState("idle");
-    }
-  }, [stopMicAnalyzer]);
+      const error = event?.error || "unknown";
 
-  const openFollowUpWindow = useCallback(() => {
-    clearTimeout(followUpTimerRef.current);
-    clearTimeout(vadSilenceTimerRef.current);
+      // User intentionally stopped speech.
+      if (error === "canceled" || error === "interrupted") {
+        finish();
+        return;
+      }
 
-    if (!speechSupported) {
-      setState("idle");
-      return;
-    }
+      /*
+       * IMPORTANT:
+       * A failed first chunk must NOT terminate the whole response.
+       * Retry once, then skip ONLY this chunk.
+       */
+      if (currentRetry === 0) {
+        currentRetry = 1;
 
-    setState("awaiting-question");
-    awaitingRef.current = true;
-    startMicAnalyzer();
+        setTimeout(() => {
+          if (!finished) speakNext();
+        }, 100);
 
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      setState("idle");
-      return;
-    }
+        return;
+      }
 
-    const followUp = new Recognition();
-    const activeLangTag = lang === "hi" ? "hi-IN" : lang === "en" ? "en-IN" : "hi-IN";
-    followUp.lang = activeLangTag;
-    followUp.continuous = true;
-    followUp.interimResults = true;
-
-    followUp.onresult = (e) => {
-      const rawTranscript = e.results[e.results.length - 1][0].transcript;
-      setLiveInterim(rawTranscript);
-
-      clearTimeout(vadSilenceTimerRef.current);
-      vadSilenceTimerRef.current = setTimeout(() => {
-        if (rawTranscript.trim().length > 1) {
-          clearTimeout(followUpTimerRef.current);
-          awaitingRef.current = false;
-          setLiveInterim("");
-          stopMicAnalyzer();
-          try {
-            followUp.stop();
-          } catch (_) {}
-          if (handleUtteranceRef.current) {
-            handleUtteranceRef.current(rawTranscript);
-          }
-        }
-      }, VAD_SILENCE_TIMEOUT_MS);
+      skipCurrentChunk();
     };
-
-    followUp.onerror = () => finishFollowUpWindow();
-    followUp.onend = () => {};
 
     try {
-      followUp.start();
-      recognitionRef.current = followUp;
-    } catch (_) {}
+      synth.speak(utterance);
 
-    followUpTimerRef.current = setTimeout(() => {
-      try {
-        followUp.stop();
-      } catch (_) {}
-      finishFollowUpWindow();
-    }, FOLLOW_UP_WINDOW_MS);
-  }, [lang, speechSupported, startMicAnalyzer, stopMicAnalyzer, finishFollowUpWindow]);
-
-  useEffect(() => {
-    openFollowUpRef.current = openFollowUpWindow;
-  }, [openFollowUpWindow]);
-
-  const handleUserUtterance = useCallback(
-    async (rawText) => {
-      const text = normalizeSpokenText(rawText);
-      if (!text || text.length < 2) {
-        finishFollowUpWindow();
-        return;
-      }
-
-      playAudioChime("confirm");
-      setState("processing");
-      setLastUserSpeech(text);
-      setLastAiReply("");
-
-      // 1. Fast Local Alexa Skill Execution
-      let intent = null;
-      try {
-        intent = parseLocalIntents(text);
-      } catch (_) {
-        intent = null;
-      }
-
-      if (intent) {
-        if (intent.type === "SET_LANG") {
-          changeLang(intent.lang);
-          const reply =
-            intent.lang === "hi"
-              ? "Theek hai, ab se hum Hindi mein baat karenge."
-              : "Sure, I have switched to English mode.";
-          if (speakRef.current) speakRef.current(reply);
-          return;
-        }
-
-        if (intent.type === "GET_BRIEFING") {
-          try {
-            const context = await getLiveFinancialContext();
-            const progress = context.progress;
-
-            // The backend's progress endpoint is the source of truth.
-            if (progress?.narrative) {
-              if (speakRef.current) speakRef.current(progress.narrative);
-            } else {
-              const reply =
-                lang === "hi"
-                  ? "Mujhe aapka live financial summary mil gaya, lekin backend ne briefing text nahi bheja."
-                  : "I reached your live financial data, but the backend did not return a briefing.";
-              if (speakRef.current) speakRef.current(reply);
-            }
-          } catch (err) {
-            const reply =
-              lang === "hi"
-                ? "Live financial data load nahi ho pa raha. Please backend aur login session check karein."
-                : "I could not load your live financial data. Please check that the backend is running and you are logged in.";
-            console.warn("Live briefing error:", err);
-            if (speakRef.current) speakRef.current(reply);
-          }
-          return;
-        }
-
-        if (intent.type === "ADD_GOAL_MONEY") {
-          try {
-            const context = await getLiveFinancialContext();
-            const goals = context.goals || [];
-            const match =
-              goals.find((g) => g.goal_name.toLowerCase().includes(intent.goalQuery.toLowerCase())) ||
-              goals.find((g) => intent.goalQuery.toLowerCase().includes(g.goal_name.toLowerCase()));
-
-            if (!match) {
-              const names = goals.map((g) => g.goal_name).join(", ") || "none";
-              const reply =
-                lang === "hi"
-                  ? `Mujhe "${intent.goalQuery}" goal nahi mila. Aapke active goals hain: ${names}.`
-                  : `I couldn't find goal "${intent.goalQuery}". Your existing goals are: ${names}.`;
-              if (speakRef.current) speakRef.current(reply);
-              return;
-            }
-
-            await apiCall(`/goals/${match.id}/add-money`, {
-              method: "POST",
-              body: JSON.stringify({ amount: intent.amount }),
-            });
-
-            const newSaved = Number(match.current_saved || 0) + intent.amount;
-            const targetAmt = match.target_amount || 1;
-            const pct = Math.min(100, (newSaved / targetAmt) * 100);
-
-            const reply =
-              lang === "hi"
-                ? `Achha, maine ₹${intent.amount.toLocaleString("en-IN")} "${match.goal_name}" goal mein add kar diye hain. Ab yeh ${pct.toFixed(0)}% poora ho gaya hai!`
-                : `Added ₹${intent.amount.toLocaleString("en-IN")} to "${match.goal_name}". Your goal is now ${pct.toFixed(0)}% complete!`;
-
-            setChatHistory((p) => [...p, { role: "user", text }, { role: "ai", text: reply }]);
-            if (speakRef.current) speakRef.current(reply);
-          } catch (_) {
-            const fallbackReply =
-              lang === "hi"
-                ? "Goal update nahi ho paaya. Main bina server confirmation ke amount add hua hai aisa nahi kahunga."
-                : "The goal update failed. I will not claim that money was added without server confirmation.";
-            if (speakRef.current) speakRef.current(fallbackReply);
-          }
-          return;
-        }
-
-        if (intent.type === "GET_PROGRESS") {
-          try {
-            const context = await getLiveFinancialContext();
-            const data = context.progress;
-
-            if (data?.success && data?.narrative) {
-              if (speakRef.current) speakRef.current(data.narrative);
-            } else {
-              const reply =
-                lang === "hi"
-                  ? "Aapka mahine ka budget aachha chal raha hai. Aapne lagbhag 80% bachat target achieve kar liya hai."
-                  : "Here is your status: You are making solid progress on your monthly target budget.";
-              if (speakRef.current) speakRef.current(reply);
-            }
-          } catch (_) {
-            const reply =
-              lang === "hi"
-                ? "Aapki savings achhi sthiti mein hain. Aap apne monthly budget par aage badh rahe hain."
-                : "You are on track with your financial targets. Keep up the good work!";
-            if (speakRef.current) speakRef.current(reply);
-          }
-          return;
-        }
-
-        if (intent.type === "GET_INVESTMENT_ADVICE") {
-          try {
-            const context = await getLiveFinancialContext();
-            const liveContext = formatLiveContext(context);
-
-            const res = await apiCall("/chat", {
-              method: "POST",
-              body: JSON.stringify({
-                message: text,
-                conversation_history: [],
-                preferred_language: lang,
-                live_context: liveContext,
-              }),
-            });
-
-            const reply =
-              res.reply ||
-              res.response ||
-              res.narrative ||
-              "I could not generate a live investment response.";
-
-            if (speakRef.current) speakRef.current(reply);
-          } catch (err) {
-            console.warn("Live investment advice error:", err);
-            const reply =
-              lang === "hi"
-                ? "Aapke live financial data ke bina investment suggestion dena sahi nahi hoga. Pehle live data load karein."
-                : "I do not want to give a personalized investment suggestion without your live financial data.";
-            if (speakRef.current) speakRef.current(reply);
-          }
-          return;
-        }
-
-        if (intent.type === "GET_CATEGORY_SPEND") {
-          try {
-            const context = await getLiveFinancialContext();
-
-            const res = await apiCall("/chat", {
-              method: "POST",
-              body: JSON.stringify({
-                user_id: context.user?.id,
-                message: text,
-                conversation_history: [],
-                preferred_language: lang,
-                live_context: formatLiveContext(context),
-              }),
-            });
-
-            const reply =
-              res.reply ||
-              res.response ||
-              res.narrative ||
-              `I could not calculate the live spending for ${intent.categoryQuery}.`;
-
-            if (speakRef.current) speakRef.current(reply);
-          } catch (err) {
-            console.warn("Live category spend error:", err);
-            const reply =
-              lang === "hi"
-                ? `Main "${intent.categoryQuery}" ka live kharcha abhi load nahi kar pa raha hoon.`
-                : `I could not load the live spending for "${intent.categoryQuery}".`;
-            if (speakRef.current) speakRef.current(reply);
-          }
-          return;
-        }
-      }
-
-      // 2. Fallback to Gemini 3 / Llama AI Pipeline
-      try {
-        const formattedHistory = chatHistory.slice(-8).map((h) => ({
-          role: h.role,
-          message: h.text || h.message || "",
-        }));
-
-        const liveContext = await getLiveFinancialContext();
-
-        const res = await apiCall("/chat", {
-          method: "POST",
-          body: JSON.stringify({
-            // Compatibility for the current backend. The value comes from
-            // the authenticated Flask session, never from a hard-coded ID.
-            user_id: liveContext.user?.id,
-            message: text,
-            conversation_history: formattedHistory,
-            preferred_language: lang,
-            live_context: formatLiveContext(liveContext),
-          }),
-        });
-
-        const reply = res.reply || res.response || res.narrative || (typeof res === "string" ? res : "");
-        if (!reply) throw new Error("Empty response from AI engine.");
-
-        setChatHistory((p) => [...p, { role: "user", text }, { role: "ai", text: reply }]);
-
-        if (speakRef.current) {
-          speakRef.current(reply);
-        } else {
-          setState("idle");
-        }
-      } catch (err) {
-        console.warn("API Error caught, firing fallback:", err.message);
-        const offlineFallback =
-          lang === "hi"
-            ? `Maine aapki baat samajh li hai: "${text}". Live financial data abhi available nahi hai, isliye main koi amount guess nahi karunga.`
-            : `I heard your query: "${text}". Live financial data is currently unavailable, so I will not guess any financial amount.`;
-
-        setLastAiReply(offlineFallback);
-        if (speakRef.current) speakRef.current(offlineFallback);
-      }
-    },
-    [chatHistory, lang, finishFollowUpWindow]
-  );
-
-  useEffect(() => {
-    handleUtteranceRef.current = handleUserUtterance;
-  }, [handleUserUtterance]);
-
-  const startBackgroundListening = useCallback(() => {
-    if (!speechSupported || speakingRef.current) return;
-
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) return;
-
-    const bgRec = new Recognition();
-    const activeLangTag = lang === "hi" ? "hi-IN" : "en-IN";
-    bgRec.lang = activeLangTag;
-    bgRec.continuous = true;
-    bgRec.interimResults = true;
-
-    bgRec.onresult = (event) => {
-      const result = event.results[event.results.length - 1];
-      const rawText = result[0].transcript.trim();
-
-      if (!result.isFinal) {
-        setLiveInterim(rawText);
-        const fuzzy = isFuzzyWakeWordMatch(rawText);
-        if (fuzzy.matched) {
-          playAudioChime("wake");
-          startMicAnalyzer();
-          const remainder = rawText.toLowerCase().split(fuzzy.wakeWord)[1]?.trim();
-          try {
-            bgRec.stop();
-          } catch (_) {}
-
-          if (remainder && remainder.length > 2) {
-            if (handleUtteranceRef.current) handleUtteranceRef.current(remainder);
-          } else {
-            if (openFollowUpRef.current) openFollowUpRef.current();
-          }
-        }
-        return;
-      }
-
-      setLiveInterim("");
-      const fuzzyFinal = isFuzzyWakeWordMatch(rawText);
-
-      if (fuzzyFinal.matched) {
-        playAudioChime("wake");
-        startMicAnalyzer();
-        const remainder = rawText.toLowerCase().split(fuzzyFinal.wakeWord)[1]?.trim();
+      // Wake Chrome/Safari speech queue after speak().
+      setTimeout(() => {
         try {
-          bgRec.stop();
+          if (!finished) synth.resume();
+        } catch (_) {}
+      }, 100);
+
+      keepAlive = setInterval(() => {
+        if (finished) {
+          clearTimers();
+          return;
+        }
+
+        try {
+          if (synth.paused) synth.resume();
+        } catch (_) {}
+      }, 1200);
+
+      /*
+       * If Safari/Chrome silently refuses to start this chunk,
+       * retry once and then SKIP the stuck chunk.
+       */
+      watchdog = setTimeout(() => {
+        if (finished || hasStarted) return;
+
+        try {
+          synth.cancel();
+          synth.resume();
         } catch (_) {}
 
-        if (remainder && remainder.length > 2) {
-          if (handleUtteranceRef.current) handleUtteranceRef.current(remainder);
+        if (currentRetry === 0) {
+          currentRetry = 1;
+
+          setTimeout(() => {
+            if (!finished) speakNext();
+          }, 100);
         } else {
-          if (openFollowUpRef.current) openFollowUpRef.current();
+          skipCurrentChunk();
+        }
+      }, 3500);
+    } catch (_) {
+      // Synchronous failure: retry once, then skip only this chunk.
+      if (currentRetry === 0) {
+        currentRetry = 1;
+
+        setTimeout(() => {
+          if (!finished) speakNext();
+        }, 100);
+      } else {
+        skipCurrentChunk();
+      }
+    }
+  };
+
+  speakNext();
+}
+
+/* ------------------------------------------------------------------ */
+/* Local assistant fallback                                            */
+/* ------------------------------------------------------------------ */
+
+function localAssistant(text, language) {
+  const value = safeText(text).trim();
+  const lower = value.toLowerCase();
+
+  const isHindi = language === "hi";
+
+  if (
+    lower === "hello" ||
+    lower === "hi" ||
+    lower === "hey" ||
+    lower.includes("hello alexa") ||
+    lower.includes("hi alexa")
+  ) {
+    return isHindi
+      ? "नमस्ते! मैं AmiVest Alexa हूँ। मैं आपके खर्च, goals, budget, transactions, savings और investments में मदद कर सकती हूँ।"
+      : "Hello! I am AmiVest Alexa. I can help you with your expenses, goals, budget, transactions, savings and investments.";
+  }
+
+  if (
+    lower.includes("who are you") ||
+    lower.includes("what are you") ||
+    lower.includes("tum kaun") ||
+    lower.includes("aap kaun")
+  ) {
+    return isHindi
+      ? "मैं AmiVest Alexa हूँ, आपके personal finance assistant की तरह काम करती हूँ।"
+      : "I am AmiVest Alexa, your personal finance assistant.";
+  }
+
+  if (
+    lower.includes("thank") ||
+    lower.includes("thanks") ||
+    lower.includes("dhanyavaad")
+  ) {
+    return isHindi
+      ? "आपका स्वागत है! मैं आपकी financial planning में मदद करने के लिए तैयार हूँ।"
+      : "You're welcome! I am ready to help with your financial planning.";
+  }
+
+  if (
+    lower.includes("good morning") ||
+    lower.includes("good evening") ||
+    lower.includes("good afternoon")
+  ) {
+    return isHindi
+      ? "नमस्ते! आपका AmiVest dashboard तैयार है। आज हम क्या manage करें?"
+      : "Hello! Your AmiVest dashboard is ready. What would you like to manage today?";
+  }
+
+  if (
+    lower.includes("what can you do") ||
+    lower.includes("kya kar sakti") ||
+    lower.includes("kya karte ho")
+  ) {
+    return isHindi
+      ? "मैं goals, expenses, transactions, budgets, savings, investments और loans को view और manage करने में आपकी मदद कर सकती हूँ।"
+      : "I can help you view and manage goals, expenses, transactions, budgets, savings, investments and loans.";
+  }
+
+  if (
+    lower.includes("show my goals") ||
+    lower === "goals" ||
+    lower.includes("mere goals")
+  ) {
+    return isHindi
+      ? "मैं आपके goals दिखा सकती हूँ। Goals page खोलें या backend connection उपलब्ध होने पर मैं आपके saved goals पढ़ूँगी।"
+      : "I can show your goals. Open the Goals page, or I can read your saved goals when the backend connection is available.";
+  }
+
+  if (
+    lower.includes("show my budget") ||
+    lower.includes("monthly budget") ||
+    lower === "budget"
+  ) {
+    return isHindi
+      ? "मैं आपका monthly budget दिखा सकती हूँ। Budget page में आपकी limits और spending दिखाई जाएगी।"
+      : "I can show your monthly budget, including your limits and spending.";
+  }
+
+  if (
+    lower.includes("show my transactions") ||
+    lower.includes("recent transactions") ||
+    lower === "transactions"
+  ) {
+    return isHindi
+      ? "मैं आपकी recent transactions दिखा सकती हूँ। Transactions page खोलें या backend connection से मैं उन्हें पढ़ सकती हूँ।"
+      : "I can show your recent transactions. Open the Transactions page or let me read them from the backend.";
+  }
+
+  if (
+    lower.includes("add") &&
+    (lower.includes("food") || lower.includes("expense"))
+  ) {
+    return isHindi
+      ? "मैं expense add करने के लिए तैयार हूँ। Amount और category बताइए, जैसे: food में 500 रुपये add करो।"
+      : "I am ready to add the expense. Tell me the amount and category, for example: add 500 in food.";
+  }
+
+  if (
+    lower.includes("save") ||
+    lower.includes("saving") ||
+    lower.includes("bachat")
+  ) {
+    return isHindi
+      ? "Saving के लिए पहले आपकी monthly income और essential expenses देखना बेहतर होगा।"
+      : "For a useful saving plan, I should first consider your monthly income and essential expenses.";
+  }
+
+  return isHindi
+    ? `मैंने सुना: "${value}". मैं इस request को समझने की कोशिश कर रही हूँ। आप goals, expenses, budget या transactions के बारे में पूछ सकते हैं।`
+    : `I heard: "${value}". I am ready to help. You can ask about goals, expenses, budget or transactions.`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Component                                                           */
+/* ------------------------------------------------------------------ */
+
+export default function AmiVestAlexaPro({
+  onRefresh,
+  initiallyOpen = false,
+  position = "bottom-left",
+}) {
+  const navigate = useNavigate();
+
+  const inputRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const wakeRecognitionRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const sendLockRef = useRef(false);
+
+  const [open, setOpen] = useState(initiallyOpen);
+  const [language, setLanguage] = useState(
+    () => localStorage.getItem("amivest_alexa_language") || "en"
+  );
+
+  const [message, setMessage] = useState("");
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [messages, setMessages] = useState([
+    {
+      id: "welcome",
+      role: "assistant",
+      text: "Hello! I am AmiVest Alexa. How can I help you with your finances today?",
+    },
+  ]);
+
+  const [thinking, setThinking] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [userId, setUserId] = useState(null);
+  const [error, setError] = useState("");
+  const [wakeWordActive, setWakeWordActive] = useState(false);
+
+  const positionStyle = useMemo(() => {
+    if (position === "bottom-right") {
+      return { right: 16, left: "auto" };
+    }
+    return { left: 16, right: "auto" };
+  }, [position]);
+
+  const pushMessage = useCallback((role, text) => {
+    const clean = safeText(text).trim();
+    if (!clean) return;
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `${Date.now()}-${Math.random()}`,
+        role,
+        text: clean,
+      },
+    ]);
+  }, []);
+
+  const refreshApp = useCallback(
+    (payload = {}) => {
+      try {
+        if (typeof onRefresh === "function") onRefresh(payload);
+      } catch (_) {}
+
+      try {
+        window.dispatchEvent(
+          new CustomEvent("amivest:data-changed", { detail: payload })
+        );
+      } catch (_) {}
+    },
+    [onRefresh]
+  );
+
+  const checkSession = useCallback(async () => {
+    let localId = null;
+
+    try {
+      const stored = localStorage.getItem("user");
+
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        localId = parsed?.id ?? parsed?.user_id ?? null;
+      }
+    } catch (_) {}
+
+    /*
+      We deliberately do not block the assistant when session lookup
+      fails. The assistant can still answer normal questions locally.
+    */
+    setUserId(localId);
+    setConnected(Boolean(localId));
+
+    return {
+      authenticated: Boolean(localId),
+      user_id: localId,
+    };
+  }, []);
+
+  useEffect(() => {
+    checkSession();
+
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.getVoices();
+
+        const old = window.speechSynthesis.onvoiceschanged;
+
+        window.speechSynthesis.onvoiceschanged = () => {
+          try {
+            window.speechSynthesis.getVoices();
+          } catch (_) {}
+
+          if (typeof old === "function") old();
+        };
+      } catch (_) {}
+    }
+
+    return () => {
+      try {
+        recognitionRef.current?.stop();
+      } catch (_) {}
+
+      try {
+        wakeRecognitionRef.current?.stop();
+      } catch (_) {}
+
+      stopBrowserSpeech();
+    };
+  }, [checkSession]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
+  }, [messages, thinking, liveTranscript]);
+
+  const stopSpeaking = useCallback(() => {
+    stopBrowserSpeech();
+    setSpeaking(false);
+  }, []);
+
+  const speakReply = useCallback(
+    (text) => {
+      if (!text) return;
+
+      setSpeaking(true);
+      setError("");
+
+      speakText(
+        text,
+        language,
+        () => {
+          setSpeaking(true);
+        },
+        () => {
+          setSpeaking(false);
+        },
+        (speechError) => {
+          setSpeaking(false);
+          if (speechError) setError(speechError);
+        }
+      );
+    },
+    [language]
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Backend command helpers                                        */
+  /* -------------------------------------------------------------- */
+
+  const apiRequest = useCallback(async (path, options = {}) => {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    });
+
+    let data = {};
+
+    try {
+      data = await response.json();
+    } catch (_) {}
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+    };
+  }, []);
+
+  const executeVoiceCommand = useCallback(
+    async (text, uid) => {
+      const lower = text.toLowerCase().trim();
+
+      /* ---------- Delete all goals ---------- */
+      if (
+        (lower.includes("delete all") ||
+          lower.includes("remove all") ||
+          lower.includes("clear all")) &&
+        (lower.includes("goal") || lower.includes("goals"))
+      ) {
+        const result = await apiRequest(
+          `/api/voice/goals/all?user_id=${encodeURIComponent(uid)}`,
+          { method: "DELETE" }
+        );
+
+        if (!result.ok) {
+          return {
+            handled: true,
+            success: false,
+            reply:
+              result.status === 401
+                ? "I could not delete the goals because your login session has expired. Please log in again and retry."
+                : `I could not delete the goals. Server returned ${result.status}.`,
+          };
+        }
+
+        refreshApp({ type: "goals-deleted-all" });
+
+        return {
+          handled: true,
+          success: true,
+          reply:
+            language === "hi"
+              ? "सभी goals सफलतापूर्वक delete कर दिए गए हैं।"
+              : "All your goals have been successfully deleted.",
+        };
+      }
+
+      /* ---------- Delete a specific goal ---------- */
+      if (
+        (lower.includes("delete") ||
+          lower.includes("remove") ||
+          lower.includes("hata") ||
+          lower.includes("हटा")) &&
+        lower.includes("goal")
+      ) {
+        /*
+          Try to send the complete command to the backend chat first.
+          This keeps matching logic in one place if your backend already
+          supports natural-language goal deletion.
+        */
+        return {
+          handled: false,
+          requiresBackend: true,
+        };
+      }
+
+      /* ---------- Delete all transactions ---------- */
+      if (
+        (lower.includes("delete all") ||
+          lower.includes("remove all") ||
+          lower.includes("clear all")) &&
+        (lower.includes("transaction") ||
+          lower.includes("transactions") ||
+          lower.includes("expense"))
+      ) {
+        const result = await apiRequest(
+          `/api/voice/transactions/all?user_id=${encodeURIComponent(uid)}`,
+          { method: "DELETE" }
+        );
+
+        if (!result.ok) {
+          return {
+            handled: true,
+            success: false,
+            reply: `I could not delete the transactions. Server returned ${result.status}.`,
+          };
+        }
+
+        refreshApp({ type: "transactions-deleted-all" });
+
+        return {
+          handled: true,
+          success: true,
+          reply:
+            language === "hi"
+              ? "सभी transactions delete कर दिए गए हैं।"
+              : "All transaction records have been deleted.",
+        };
+      }
+
+      /* ---------- Delete all budgets ---------- */
+      if (
+        (lower.includes("delete all") ||
+          lower.includes("remove all") ||
+          lower.includes("clear all")) &&
+        (lower.includes("budget") || lower.includes("limit"))
+      ) {
+        const result = await apiRequest(
+          `/api/voice/budgets/all?user_id=${encodeURIComponent(uid)}`,
+          { method: "DELETE" }
+        );
+
+        if (!result.ok) {
+          return {
+            handled: true,
+            success: false,
+            reply: `I could not delete the budgets. Server returned ${result.status}.`,
+          };
+        }
+
+        refreshApp({ type: "budgets-deleted-all" });
+
+        return {
+          handled: true,
+          success: true,
+          reply:
+            language === "hi"
+              ? "सभी budget limits delete कर दी गई हैं।"
+              : "All budget limits have been deleted.",
+        };
+      }
+
+      return { handled: false };
+    },
+    [apiRequest, language, refreshApp]
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Main send                                                       */
+  /* -------------------------------------------------------------- */
+
+  const sendMessage = useCallback(
+    async (overrideText = null) => {
+      const text = safeText(overrideText ?? message).trim();
+
+      if (!text || thinking || sendLockRef.current) return;
+
+      sendLockRef.current = true;
+      setError("");
+      setLiveTranscript("");
+      setMessage("");
+      setThinking(true);
+
+      // IMPORTANT: call this before any await/fetch. Safari requires
+      // speech activity to originate from the user's interaction.
+      primeSafariSpeech();
+
+      pushMessage("user", text);
+
+      /*
+        Speak basic local answers immediately. This means "hello"
+        will always get a response even if Flask/Gemini is offline.
+      */
+      const localReply = localAssistant(text, language);
+      const lower = text.toLowerCase();
+
+      const isSimpleConversation =
+        lower === "hello" ||
+        lower === "hi" ||
+        lower === "hey" ||
+        lower.includes("who are you") ||
+        lower.includes("what are you") ||
+        lower.includes("what can you do") ||
+        lower.includes("thank") ||
+        lower.includes("good morning") ||
+        lower.includes("good evening") ||
+        lower.includes("good afternoon");
+
+      try {
+        const session = await checkSession();
+        const uid = session.user_id;
+
+        /* Execute direct destructive commands first. */
+        if (uid) {
+          const commandResult = await executeVoiceCommand(text, uid);
+
+          if (commandResult.handled) {
+            pushMessage("assistant", commandResult.reply);
+            setTimeout(() => speakReply(commandResult.reply), 80);
+            return;
+          }
+        }
+
+        /*
+          Normal greeting/basic conversation should not depend on the
+          backend. This specifically fixes the "hello does nothing" case.
+        */
+        if (isSimpleConversation) {
+          pushMessage("assistant", localReply);
+          setTimeout(() => speakReply(localReply), 80);
+          return;
+        }
+
+        /*
+          Backend AI request.
+          credentials: include is essential for Flask session cookies.
+        */
+        let backendWorked = false;
+
+        try {
+          const response = await fetch(`${API_BASE}/chat`, {
+            method: "POST",
+            credentials: "include",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              user_id: uid || undefined,
+              message: text,
+            }),
+          });
+
+          let data = {};
+
+          try {
+            data = await response.json();
+          } catch (_) {}
+
+          if (response.ok) {
+            const responseText = safeText(
+              data.reply ||
+                data.response ||
+                data.answer ||
+                data.message ||
+                data.data?.reply
+            ).trim();
+
+            if (responseText) {
+              backendWorked = true;
+
+              pushMessage("assistant", responseText);
+              setTimeout(() => speakReply(responseText), 80);
+              refreshApp(data);
+              return;
+            }
+          }
+
+          /*
+            401 is the exact error that was appearing in your Flask
+            terminal. Do not leave the UI blank. Fall back to a useful
+            local answer and clearly tell the user what happened.
+          */
+          if (response.status === 401) {
+            setConnected(false);
+
+            const fallback =
+              language === "hi"
+                ? `${localReply}\n\nनोट: AI server ने login session के कारण 401 दिया है। Basic Alexa अभी भी काम कर रही है।`
+                : `${localReply}\n\nNote: The AI server returned 401 because the login session is not authenticated. Basic Alexa is still working.`;
+
+            pushMessage("assistant", fallback);
+            setTimeout(() => speakReply(fallback), 80);
+            return;
+          }
+
+          if (!response.ok) {
+            const fallback =
+              language === "hi"
+                ? `${localReply}\n\nServer error ${response.status}.`
+                : `${localReply}\n\nServer error ${response.status}.`;
+
+            pushMessage("assistant", fallback);
+            setTimeout(() => speakReply(fallback), 80);
+            return;
+          }
+        } catch (networkError) {
+          /*
+            If Flask is completely unavailable, the assistant still
+            replies instead of appearing dead.
+          */
+          const fallback =
+            language === "hi"
+              ? `${localReply}\n\nAI server अभी उपलब्ध नहीं है, इसलिए मैंने offline assistant से जवाब दिया है।`
+              : `${localReply}\n\nThe AI server is not available right now, so I answered using the offline assistant.`;
+
+          pushMessage("assistant", fallback);
+          speakReply(fallback);
+          return;
+        }
+
+        if (!backendWorked) {
+          pushMessage("assistant", localReply);
+          setTimeout(() => speakReply(localReply), 80);
+        }
+      } catch (err) {
+        const fallback =
+          language === "hi"
+            ? "माफ़ कीजिए, request process करते समय समस्या हुई। कृपया फिर से कोशिश करें।"
+            : "Sorry, there was a problem processing your request. Please try again.";
+
+        setError(err?.message || "Request failed.");
+        pushMessage("assistant", fallback);
+        setTimeout(() => speakReply(fallback), 80);
+      } finally {
+        setThinking(false);
+        sendLockRef.current = false;
+      }
+    },
+    [
+      checkSession,
+      executeVoiceCommand,
+      language,
+      message,
+      pushMessage,
+      refreshApp,
+      speakReply,
+      thinking,
+    ]
+  );
+
+  /* -------------------------------------------------------------- */
+  /* Speech recognition                                              */
+  /* -------------------------------------------------------------- */
+
+  const startVoice = useCallback(async () => {
+    setError("");
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setError(
+        "Voice input is not available in this browser. Use Chrome or Edge and allow microphone access."
+      );
+      return;
+    }
+
+    // If already listening, the microphone button becomes a real STOP button.
+    if (listening) {
+      try {
+        recognitionRef.current?.stop();
+      } catch (_) {}
+
+      recognitionRef.current = null;
+      setListening(false);
+      setLiveTranscript("");
+      return;
+    }
+
+    // Never start listening while Alexa is speaking.
+    stopSpeaking();
+
+    /*
+     * Explicitly request microphone permission first.
+     * This makes the permission state much more reliable on Chrome/Safari.
+     * The audio stream is immediately released because SpeechRecognition
+     * owns the actual recognition session.
+     */
+    try {
+      if (navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+
+        stream.getTracks().forEach((track) => track.stop());
+      }
+    } catch (permissionError) {
+      console.error("Microphone permission:", permissionError);
+
+      const name = permissionError?.name || "";
+
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setError(
+          "Microphone permission is blocked. Click the lock icon in the browser address bar and allow Microphone for AmiVest."
+        );
+      } else if (name === "NotFoundError") {
+        setError("No microphone was found. Connect or enable a microphone.");
+      } else {
+        setError(
+          "AmiVest could not access the microphone. Check your browser microphone settings."
+        );
+      }
+
+      setListening(false);
+      return;
+    }
+
+    let recognition;
+
+    try {
+      recognition = new SpeechRecognition();
+    } catch (error) {
+      console.error("Recognition creation failed:", error);
+      setError("Could not create the voice recognition session.");
+      return;
+    }
+
+    const selectedLanguage =
+      localStorage.getItem("amivest_alexa_language") ||
+      localStorage.getItem("amivest_language") ||
+      language ||
+      "en";
+
+    /*
+     * Hindi mode -> hi-IN
+     * English mode -> en-IN
+     *
+     * The assistant still detects Hindi text after recognition and can
+     * respond in Hindi/English through the existing TTS engine.
+     */
+    recognition.lang =
+      selectedLanguage === "hi" ||
+      selectedLanguage === "hindi"
+        ? "hi-IN"
+        : "en-IN";
+
+    /*
+     * continuous=true gives the user a natural speaking window.
+     * interimResults=true makes the typed words appear while speaking.
+     */
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 5;
+
+    let finalTranscript = "";
+    let endedNormally = false;
+    let resultReceived = false;
+
+    recognition.onstart = () => {
+      setOpen(true);
+      setListening(true);
+      setLiveTranscript("");
+      setError("");
+      finalTranscript = "";
+      resultReceived = false;
+    };
+
+    recognition.onaudiostart = () => {
+      setListening(true);
+      setError("");
+    };
+
+    recognition.onsoundstart = () => {
+      setListening(true);
+    };
+
+    recognition.onspeechstart = () => {
+      setListening(true);
+      setError("");
+    };
+
+    recognition.onresult = (event) => {
+      let interimText = "";
+      let finalText = "";
+
+      for (
+        let i = event.resultIndex;
+        i < event.results.length;
+        i += 1
+      ) {
+        const result = event.results[i];
+
+        if (!result || !result[0]) continue;
+
+        const transcript = safeText(
+          result[0].transcript
+        ).trim();
+
+        if (!transcript) continue;
+
+        resultReceived = true;
+
+        if (result.isFinal) {
+          finalText += `${transcript} `;
+        } else {
+          interimText += `${transcript} `;
         }
       }
-    };
 
-    bgRec.onerror = () => {
-      if (wakeWordOnRef.current && !speakingRef.current) {
+      if (finalText.trim()) {
+        finalTranscript =
+          `${finalTranscript} ${finalText}`.replace(/\s+/g, " ").trim();
+      }
+
+      const visible =
+        `${finalTranscript} ${interimText}`
+          .replace(/\s+/g, " ")
+          .trim();
+
+      if (visible) {
+        // IMPORTANT: show exactly what the microphone is hearing.
+        setLiveTranscript(visible);
+        setMessage(visible);
+      }
+
+      /*
+       * Send ONLY final text.
+       * Previously, a recognition event could be ended before the UI had
+       * enough time to display the final transcript.
+       */
+      if (finalTranscript.trim()) {
+        endedNormally = true;
+
+        const command = finalTranscript.trim();
+
+        setListening(false);
+
+        // Give React one frame to display the recognized words.
         setTimeout(() => {
-          if (startListeningRef.current) startListeningRef.current();
-        }, 500);
+          setLiveTranscript("");
+
+          if (command) {
+            sendMessage(command);
+          }
+        }, 120);
+
+        try {
+          recognition.stop();
+        } catch (_) {}
       }
     };
 
-    bgRec.onend = () => {
-      if (wakeWordOnRef.current && !speakingRef.current && !awaitingRef.current) {
+    recognition.onerror = (event) => {
+      const code = event?.error || "unknown";
+
+      console.warn("AmiVest voice recognition:", code);
+
+      /*
+       * These are normal browser lifecycle events and should NOT show
+       * scary errors to the user.
+       */
+      if (
+        code === "aborted" ||
+        code === "service-not-allowed"
+      ) {
+        setListening(false);
+        return;
+      }
+
+      if (code === "no-speech") {
+        setListening(false);
+
+        if (!resultReceived) {
+          setError(
+            "I did not hear you. Tap the microphone and speak clearly."
+          );
+        }
+
+        return;
+      }
+
+      if (code === "not-allowed") {
+        setListening(false);
+        setError(
+          "Microphone permission denied. Allow Microphone for this AmiVest site and try again."
+        );
+        return;
+      }
+
+      if (code === "audio-capture") {
+        setListening(false);
+        setError(
+          "No working microphone was detected. Check your Mac microphone input."
+        );
+        return;
+      }
+
+      if (code === "network") {
+        setListening(false);
+        setError(
+          "Voice recognition network service failed. Check your internet connection and try again."
+        );
+        return;
+      }
+
+      setListening(false);
+      setError(`Voice recognition error: ${code}`);
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+
+      if (recognitionRef.current === recognition) {
+        recognitionRef.current = null;
+      }
+
+      /*
+       * If the browser ends recognition after receiving a final command,
+       * do nothing. sendMessage() has already been scheduled.
+       */
+      if (endedNormally || finalTranscript.trim()) {
+        return;
+      }
+
+      setLiveTranscript("");
+
+      // No result: don't silently leave the UI in a fake listening state.
+      if (!resultReceived) {
+        setError((current) =>
+          current ||
+          "Microphone stopped listening. Tap 🎤 and try again."
+        );
+      }
+    };
+
+    recognition.onnomatch = () => {
+      setListening(false);
+      setError("I couldn't understand that. Please speak again.");
+    };
+
+    recognitionRef.current = recognition;
+
+    try {
+      /*
+       * speechRecognition.start() must happen as part of the user's
+       * microphone-button action. Do not delay this call.
+       */
+      recognition.start();
+    } catch (error) {
+      console.error("Recognition start failed:", error);
+
+      recognitionRef.current = null;
+      setListening(false);
+
+      if (error?.name === "InvalidStateError") {
+        setError("Voice recognition is already running. Tap 🎤 again.");
+      } else {
+        setError(
+          "Could not start the microphone. Allow microphone access and try again."
+        );
+      }
+    }
+  }, [language, listening, sendMessage, stopSpeaking]);
+
+  /* -------------------------------------------------------------- */
+  /* Optional wake word                                               */
+  /* -------------------------------------------------------------- */
+
+  useEffect(() => {
+    if (!wakeWordActive) {
+      try {
+        wakeRecognitionRef.current?.stop();
+      } catch (_) {}
+
+      wakeRecognitionRef.current = null;
+      return;
+    }
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition || listening || speaking || thinking) return;
+
+    let alive = true;
+
+    const recognition = new SpeechRecognition();
+
+    recognition.lang = language === "hi" ? "hi-IN" : "en-IN";
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    recognition.onresult = (event) => {
+      if (!alive) return;
+
+      const last = event.results[event.results.length - 1];
+      const transcript = safeText(last?.[0]?.transcript).toLowerCase().trim();
+
+      const matched = WAKE_WORDS.some((word) =>
+        transcript.includes(word)
+      );
+
+      if (!matched) return;
+
+      try {
+        recognition.stop();
+      } catch (_) {}
+
+      setOpen(true);
+
+      const reply =
+        language === "hi"
+          ? "हाँ, कहिए। मैं सुन रही हूँ।"
+          : "Yes, I am listening. How can I help?";
+
+      pushMessage("assistant", reply);
+      speakReply(reply);
+
+      setTimeout(() => {
+        if (alive) startVoice();
+      }, 1100);
+    };
+
+    recognition.onerror = () => {
+      /* Background wake listening is optional; do not show an error. */
+    };
+
+    recognition.onend = () => {
+      if (!alive) return;
+
+      if (wakeWordActive && !listening && !speaking && !thinking) {
         setTimeout(() => {
-          if (startListeningRef.current) startListeningRef.current();
-        }, 300);
+          if (!alive) return;
+
+          try {
+            recognition.start();
+          } catch (_) {}
+        }, 800);
       }
     };
 
     try {
-      bgRec.start();
-      recognitionRef.current = bgRec;
-      if (state !== "processing" && state !== "speaking") setState("idle");
+      recognition.start();
+      wakeRecognitionRef.current = recognition;
     } catch (_) {}
-  }, [lang, speechSupported, startMicAnalyzer, state]);
 
-  useEffect(() => {
-    startListeningRef.current = startBackgroundListening;
-  }, [startBackgroundListening]);
-
-  useEffect(() => {
-    watchdogIntervalRef.current = setInterval(() => {
-      if (wakeWordOnRef.current && !speakingRef.current && !awaitingRef.current && state === "idle") {
-        if (!recognitionRef.current) {
-          if (startListeningRef.current) startListeningRef.current();
-        }
-      }
-    }, 4000);
-
-    return () => clearInterval(watchdogIntervalRef.current);
-  }, [state]);
-
-  const toggleWakeWord = () => {
-    if (!speechSupported) {
-      setState("error");
-      playAudioChime("error");
-      return;
-    }
-    const next = !wakeWordOn;
-    setWakeWordOn(next);
-    if (next) {
-      playAudioChime("wake");
-      startBackgroundListening();
-    } else {
-      clearTimeout(followUpTimerRef.current);
-      clearTimeout(vadSilenceTimerRef.current);
-      stopMicAnalyzer();
-      try {
-        if (recognitionRef.current) recognitionRef.current.stop();
-      } catch (_) {}
-      recognitionRef.current = null;
-      setState("idle");
-    }
-  };
-
-  const triggerManualListen = () => {
-    if (!speechSupported) {
-      setState("error");
-      playAudioChime("error");
-      return;
-    }
-    playAudioChime("wake");
-    startMicAnalyzer();
-
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) return;
-
-    const rec = new Recognition();
-    rec.lang = lang === "hi" ? "hi-IN" : "en-IN";
-    rec.continuous = true;
-    rec.interimResults = true;
-
-    rec.onstart = () => setState("listening");
-    rec.onresult = (e) => {
-      const result = e.results[e.results.length - 1];
-      const rawText = result[0].transcript;
-      setLiveInterim(rawText);
-
-      clearTimeout(vadSilenceTimerRef.current);
-      vadSilenceTimerRef.current = setTimeout(() => {
-        if (rawText.trim().length > 1) {
-          setLiveInterim("");
-          stopMicAnalyzer();
-          try {
-            rec.stop();
-          } catch (_) {}
-          if (handleUtteranceRef.current) handleUtteranceRef.current(rawText);
-        }
-      }, VAD_SILENCE_TIMEOUT_MS);
-    };
-
-    rec.onerror = () => {
-      stopMicAnalyzer();
-      setState("idle");
-    };
-    rec.onend = () => {
-      stopMicAnalyzer();
-      setLiveInterim("");
-      setState("idle");
-    };
-
-    rec.start();
-    recognitionRef.current = rec;
-  };
-
-  const stopSpeaking = () => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
-    speakingRef.current = false;
-    clearTimeout(followUpTimerRef.current);
-    clearTimeout(vadSilenceTimerRef.current);
-    stopMicAnalyzer();
-    setState("idle");
-    if (wakeWordOnRef.current && startListeningRef.current) {
-      startListeningRef.current();
-    }
-  };
-
-  useEffect(() => {
     return () => {
-      clearTimeout(followUpTimerRef.current);
-      clearTimeout(vadSilenceTimerRef.current);
-      clearInterval(watchdogIntervalRef.current);
-      stopMicAnalyzer();
+      alive = false;
+
       try {
-        if (recognitionRef.current) recognitionRef.current.stop();
+        recognition.stop();
       } catch (_) {}
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        window.speechSynthesis.cancel();
+
+      if (wakeRecognitionRef.current === recognition) {
+        wakeRecognitionRef.current = null;
       }
     };
-  }, [stopMicAnalyzer]);
+  }, [
+    language,
+    listening,
+    pushMessage,
+    speakReply,
+    speaking,
+    startVoice,
+    thinking,
+    wakeWordActive,
+  ]);
+
+  const handleManualSpeak = useCallback(
+    (text) => {
+      setOpen(true);
+      setError("");
+      stopSpeaking();
+      primeSafariSpeech();
+
+      /*
+        Important: this function is triggered directly by a button click,
+        which satisfies Chrome's user-interaction requirement.
+      */
+      setTimeout(() => {
+        speakReply(text);
+      }, 30);
+    },
+    [speakReply, stopSpeaking]
+  );
+
+  const testVoice = useCallback(() => {
+    primeSafariSpeech();
+
+    const text =
+      language === "hi"
+        ? "नमस्ते। AmiVest Alexa की आवाज़ अभी काम कर रही है।"
+        : "Hello. AmiVest Alexa voice is working correctly.";
+
+    handleManualSpeak(text);
+  }, [handleManualSpeak, language]);
 
   return (
-    <div style={{ position: "fixed", bottom: "24px", left: "24px", zIndex: 9999, fontFamily: "sans-serif" }}>
-      {/* Alexa Ambient Overlay HUD Bar */}
-      {(liveInterim || ["listening", "awaiting-question", "speaking", "processing"].includes(state)) && (
-        <div style={styles.hudOverlay}>
-          <MultiModeVisualizer
-            state={state}
-            visualMode={visualMode}
-            audioLevel={audioLevel}
-            frequencyData={frequencyData}
-          />
+    <>
+      <style>{`
+        @keyframes amivestAlexaPulse {
+          0%, 100% {
+            transform: scale(1);
+            box-shadow: 0 0 12px rgba(14,165,233,.25);
+          }
+          50% {
+            transform: scale(1.04);
+            box-shadow: 0 0 30px rgba(14,165,233,.65);
+          }
+        }
 
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={styles.hudTitle}>
-                {state === "listening"
-                  ? "Alexa Voice Engine Listening…"
-                  : state === "awaiting-question"
-                  ? "Listening for Follow-up…"
-                  : state === "processing"
-                  ? "AmiVest AI Skill Processing…"
-                  : "AmiVest AI Voice Assistant"}
-              </span>
-              {audioLevel > 0.05 && (
-                <span style={styles.micBadge}>
-                  Active Mic
-                </span>
-              )}
-            </div>
-            <div style={styles.hudSubtitle}>
-              {liveInterim ||
-                lastUserSpeech ||
-                lastAiReply ||
-                "Live data mode: dashboard + goals + transactions. Say 'Hey AmiVest' or tap to speak…"}
-            </div>
-          </div>
+        @keyframes amivestListening {
+          0%, 100% {
+            box-shadow: 0 0 15px rgba(239,68,68,.25);
+          }
+          50% {
+            box-shadow: 0 0 35px rgba(239,68,68,.75);
+          }
+        }
 
-          {(state === "speaking" || state === "awaiting-question") && (
-            <button onClick={stopSpeaking} style={styles.stopBtn}>
-              Cancel
-            </button>
-          )}
-        </div>
-      )}
+        @keyframes amivestSpeaking {
+          0%, 100% {
+            box-shadow: 0 0 18px rgba(34,211,238,.25);
+          }
+          50% {
+            box-shadow: 0 0 42px rgba(34,211,238,.8);
+          }
+        }
 
-      {/* Floating Capsule Widget */}
-      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-        <button
-          onClick={state === "speaking" ? stopSpeaking : triggerManualListen}
+        .amivest-alexa-scroll::-webkit-scrollbar {
+          width: 4px;
+        }
+
+        .amivest-alexa-scroll::-webkit-scrollbar-thumb {
+          background: #16466b;
+          border-radius: 20px;
+        }
+      `}</style>
+
+      {!open && (
+        <div
+          onClick={() => setOpen(true)}
           style={{
-            ...styles.capsuleBtn,
-            borderColor: wakeWordOn ? "#00E5FF" : "#1E3A5F",
+            ...positionStyle,
+            position: "fixed",
+            bottom: 20,
+            zIndex: 99999,
+            width: 220,
+            minHeight: 68,
+            padding: "10px 12px",
+            borderRadius: 22,
+            background: "linear-gradient(145deg,#061426,#0b2944)",
+            border: "1px solid #0ea5e9",
+            boxShadow: "0 18px 45px rgba(0,0,0,.55)",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            color: "#fff",
+            cursor: "pointer",
+            animation: listening
+              ? "amivestListening 1.2s infinite"
+              : speaking
+              ? "amivestSpeaking 1.2s infinite"
+              : "amivestAlexaPulse 2s infinite",
           }}
         >
-          <MultiModeVisualizer
-            state={state}
-            visualMode={visualMode}
-            audioLevel={audioLevel}
-            frequencyData={frequencyData}
-          />
-          <div style={{ textAlign: "left" }}>
-            <div style={{ fontSize: "13px", fontWeight: "800", color: "#fff" }}>AmiVest Alexa AI</div>
-            <div style={{ fontSize: "10px", color: wakeWordOn ? "#00E5FF" : "#9CA3AF" }}>
-              {wakeWordOn ? "🔵 'Hey Alexa / AmiVest' Active" : "Tap to speak (Hindi / English)"}
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              flexShrink: 0,
+              borderRadius: "50%",
+              display: "grid",
+              placeItems: "center",
+              background:
+                "radial-gradient(circle,#e0f2fe 0 25%,#38bdf8 26% 55%,#075985 56% 100%)",
+              fontSize: 22,
+            }}
+          >
+            🤖
+          </div>
+
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 800, fontSize: 12 }}>
+              AmiVest Alexa AI
             </div>
-          </div>
-        </button>
 
-        <button onClick={() => setDrawerOpen((v) => !v)} style={styles.gearBtn} title="Voice Assistant Settings & Skills">
-          ⚙️
-        </button>
-      </div>
-
-      {/* Advanced Alexa Voice Settings Modal Drawer */}
-      {drawerOpen && (
-        <div style={styles.drawer}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: "14px", fontWeight: "700" }}>Alexa Voice Engine & Skills</span>
-            <button onClick={() => setDrawerOpen(false)} style={styles.closeBtn}>
-              ✕
-            </button>
-          </div>
-
-          {/* Visualizer Mode Toggle */}
-          <div>
-            <div style={styles.label}>VISUALIZER AURA MODE</div>
-            <div style={{ display: "flex", gap: "6px" }}>
-              <button
-                onClick={() => changeVisualMode("alexa")}
-                style={{
-                  ...styles.modeBtn,
-                  background: visualMode === "alexa" ? "#0284C7" : "#071829",
-                }}
-              >
-                Alexa Ring
-              </button>
-              <button
-                onClick={() => changeVisualMode("siri")}
-                style={{
-                  ...styles.modeBtn,
-                  background: visualMode === "siri" ? "#0D9488" : "#071829",
-                }}
-              >
-                Siri Fluid
-              </button>
-              <button
-                onClick={() => changeVisualMode("spectrum")}
-                style={{
-                  ...styles.modeBtn,
-                  background: visualMode === "spectrum" ? "#059669" : "#071829",
-                }}
-              >
-                Spectrum
-              </button>
-            </div>
-          </div>
-
-          {/* Preferred Language Toggle */}
-          <div>
-            <div style={styles.label}>PREFERRED LANGUAGE MODE</div>
-            <div style={{ display: "flex", gap: "6px" }}>
-              <button
-                onClick={() => changeLang("auto")}
-                style={{
-                  ...styles.langBtn,
-                  background: lang === "auto" ? "#0284C7" : "#071829",
-                }}
-              >
-                Auto Detect
-              </button>
-              <button
-                onClick={() => changeLang("en")}
-                style={{
-                  ...styles.langBtn,
-                  background: lang === "en" ? "#0284C7" : "#071829",
-                }}
-              >
-                English
-              </button>
-              <button
-                onClick={() => changeLang("hi")}
-                style={{
-                  ...styles.langBtn,
-                  background: lang === "hi" ? "#0284C7" : "#071829",
-                }}
-              >
-                हिंदी
-              </button>
-            </div>
-          </div>
-
-          {/* Speech Speed Controls */}
-          <div>
-            <div style={styles.label}>SPEECH RATE ({speechSpeed}x)</div>
-            <div style={{ display: "flex", gap: "6px" }}>
-              {[0.85, 1.05, 1.25].map((speed) => (
-                <button
-                  key={speed}
-                  onClick={() => setSpeechSpeed(speed)}
-                  style={{
-                    ...styles.speedBtn,
-                    background: speechSpeed === speed ? "rgba(2,132,199,0.25)" : "#071829",
-                    borderColor: speechSpeed === speed ? "#0284C7" : "#1E3A5F",
-                  }}
-                >
-                  {speed}x
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Continuous "Alexa / Hey AmiVest" Toggle */}
-          <div>
-            <div style={styles.label}>AMBIENT WAKE WORD ENGINE</div>
-            <button
-              onClick={toggleWakeWord}
+            <div
               style={{
-                ...styles.wakeToggle,
-                borderColor: wakeWordOn ? "#00E5FF" : "#1E3A5F",
-                background: wakeWordOn ? "rgba(0, 229, 255, 0.15)" : "#071829",
-                color: wakeWordOn ? "#00E5FF" : "#9CA3AF",
+                marginTop: 4,
+                fontSize: 9,
+                color: "#93c5fd",
               }}
             >
-              {wakeWordOn ? "🔵 'Alexa / Hey AmiVest' Ambient Active" : "⚪ Enable Ambient Wake Word"}
+              {listening
+                ? "🎤 Listening..."
+                : speaking
+                ? "🔊 Speaking..."
+                : "Tap to talk"}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              startVoice();
+            }}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: "50%",
+              border: "1px solid #0ea5e9",
+              background: listening ? "#dc2626" : "#0b4164",
+              color: "#fff",
+              cursor: "pointer",
+            }}
+          >
+            {listening ? "■" : "🎤"}
+          </button>
+        </div>
+      )}
+
+      {open && (
+        <div
+          style={{
+            ...positionStyle,
+            position: "fixed",
+            bottom: 18,
+            zIndex: 99999,
+            width: 410,
+            maxWidth: "calc(100vw - 28px)",
+            height: 590,
+            maxHeight: "calc(100vh - 36px)",
+            borderRadius: 22,
+            background: "linear-gradient(180deg,#061426,#082945)",
+            border: "1px solid #164e70",
+            boxShadow: "0 25px 70px rgba(0,0,0,.75)",
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            color: "#fff",
+          }}
+        >
+          {/* HEADER */}
+          <div
+            style={{
+              padding: "12px 14px",
+              borderBottom: "1px solid #16466b",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div
+                style={{
+                  width: 42,
+                  height: 42,
+                  borderRadius: "50%",
+                  display: "grid",
+                  placeItems: "center",
+                  background:
+                    "radial-gradient(circle,#e0f2fe 0 24%,#38bdf8 25% 52%,#075985 53% 100%)",
+                  animation: listening
+                    ? "amivestListening 1.2s infinite"
+                    : speaking
+                    ? "amivestSpeaking 1.2s infinite"
+                    : "none",
+                }}
+              >
+                🤖
+              </div>
+
+              <div>
+                <div
+                  style={{
+                    fontWeight: 900,
+                    fontSize: 13,
+                  }}
+                >
+                  AmiVest Alexa AI
+                </div>
+
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: connected ? "#34d399" : "#fbbf24",
+                    marginTop: 3,
+                  }}
+                >
+                  ● {connected ? `Connected • ${userId}` : "Offline assistant ready"}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 5 }}>
+              <button
+                type="button"
+                onClick={testVoice}
+                title="Test speaker"
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: "50%",
+                  border: "1px solid #1e5c80",
+                  background: "#0b3552",
+                  color: "#fff",
+                  cursor: "pointer",
+                }}
+              >
+                🔊
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setWakeWordActive((v) => !v)}
+                title="Wake word"
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: "50%",
+                  border: "1px solid #1e5c80",
+                  background: wakeWordActive ? "#0d9488" : "#0b3552",
+                  color: "#fff",
+                  cursor: "pointer",
+                }}
+              >
+                ⚡
+              </button>
+
+              {speaking && (
+                <button
+                  type="button"
+                  onClick={stopSpeaking}
+                  title="Stop speaking"
+                  style={{
+                    width: 30,
+                    height: 30,
+                    borderRadius: "50%",
+                    border: "none",
+                    background: "#dc2626",
+                    color: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  ■
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                style={{
+                  width: 30,
+                  height: 30,
+                  borderRadius: "50%",
+                  border: "1px solid #1e5c80",
+                  background: "#0b3552",
+                  color: "#fff",
+                  cursor: "pointer",
+                }}
+              >
+                −
+              </button>
+            </div>
+          </div>
+
+          {/* STATUS */}
+          <div
+            style={{
+              padding: "8px 12px",
+              background: "rgba(2,12,24,.45)",
+              borderBottom: "1px solid #123d5b",
+              minHeight: 45,
+            }}
+          >
+            <div
+              style={{
+                fontWeight: 800,
+                fontSize: 11,
+                color: speaking
+                  ? "#67e8f9"
+                  : listening
+                  ? "#fca5a5"
+                  : "#bfdbfe",
+              }}
+            >
+              {speaking
+                ? "🔊 AmiVest is speaking..."
+                : listening
+                ? "🎤 AmiVest is listening..."
+                : thinking
+                ? "🧠 AmiVest is thinking..."
+                : "🟢 AmiVest is ready"}
+            </div>
+
+            <div
+              style={{
+                fontSize: 9,
+                color: "#7895ad",
+                marginTop: 3,
+              }}
+            >
+              Speak or type. You can ask, add, edit, delete or view data.
+            </div>
+          </div>
+
+          {/* MESSAGES */}
+          <div
+            className="amivest-alexa-scroll"
+            style={{
+              flex: 1,
+              padding: 12,
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            {messages.map((item) => (
+              <div
+                key={item.id}
+                style={{
+                  alignSelf:
+                    item.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "90%",
+                }}
+              >
+                <div
+                  style={{
+                    padding: "9px 11px",
+                    borderRadius:
+                      item.role === "user"
+                        ? "14px 14px 3px 14px"
+                        : "14px 14px 14px 3px",
+                    background:
+                      item.role === "user" ? "#0d9488" : "#0c3556",
+                    border:
+                      item.role === "user"
+                        ? "1px solid #14b8a6"
+                        : "1px solid #164e70",
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {item.text}
+
+                  {item.role === "assistant" && (
+                    <div
+                      style={{
+                        marginTop: 6,
+                        display: "flex",
+                        justifyContent: "flex-end",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleManualSpeak(item.text)}
+                        style={{
+                          background: "rgba(14,165,233,.10)",
+                          border: "1px solid #0ea5e9",
+                          color: "#7dd3fc",
+                          padding: "3px 8px",
+                          borderRadius: 7,
+                          fontSize: 9,
+                          cursor: "pointer",
+                        }}
+                      >
+                        🔊 Listen
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {liveTranscript && (
+              <div
+                style={{
+                  alignSelf: "flex-end",
+                  maxWidth: "90%",
+                  padding: "7px 10px",
+                  borderRadius: 10,
+                  border: "1px dashed #22d3ee",
+                  color: "#67e8f9",
+                  fontSize: 10,
+                }}
+              >
+                🎤 {liveTranscript}
+              </div>
+            )}
+
+            {thinking && (
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "#93a9bb",
+                  padding: "4px 2px",
+                }}
+              >
+                🧠 Thinking...
+              </div>
+            )}
+
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* ERROR */}
+          {error && (
+            <div
+              style={{
+                margin: "0 12px 7px",
+                padding: "7px 9px",
+                borderRadius: 7,
+                background: "rgba(127,29,29,.45)",
+                border: "1px solid #7f1d1d",
+                color: "#fecaca",
+                fontSize: 9,
+              }}
+            >
+              ⚠️ {error}
+            </div>
+          )}
+
+          {/* LANGUAGE */}
+          <div
+            style={{
+              display: "flex",
+              gap: 5,
+              padding: "0 12px 7px",
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setLanguage("en");
+                localStorage.setItem("amivest_alexa_language", "en");
+              }}
+              style={{
+                flex: 1,
+                padding: 6,
+                borderRadius: 7,
+                border: "1px solid #164e70",
+                background: language === "en" ? "#0d9488" : "#08243b",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+              }}
+            >
+              🇮🇳 English
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setLanguage("hi");
+                localStorage.setItem("amivest_alexa_language", "hi");
+              }}
+              style={{
+                flex: 1,
+                padding: 6,
+                borderRadius: 7,
+                border: "1px solid #164e70",
+                background: language === "hi" ? "#0d9488" : "#08243b",
+                color: "#fff",
+                fontSize: 10,
+                cursor: "pointer",
+              }}
+            >
+              🇮🇳 हिन्दी
             </button>
           </div>
 
-          <div style={{ fontSize: "11px", color: "#64748B", lineHeight: "1.4" }}>
-            💡 Try speaking Alexa financial skills in Hindi or English:
-            <br />• <em>"Alexa, Good morning briefing do"</em>
-            <br />• <em>"₹5000 emergency fund mein add kar do"</em>
-            <br />• <em>"Swiggy par kitna kharcha hua?"</em>
-            <br />• <em>"Where should I invest for 5 years?"</em>
+          {/* INPUT */}
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              sendMessage();
+            }}
+            style={{
+              padding: "0 12px 8px",
+              display: "flex",
+              gap: 6,
+            }}
+          >
+            <input
+              ref={inputRef}
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              placeholder={
+                language === "hi"
+                  ? "पूछें या आदेश दें..."
+                  : "Ask AmiVest Alexa..."
+              }
+              style={{
+                flex: 1,
+                minWidth: 0,
+                padding: "9px 11px",
+                background: "#041522",
+                border: "1px solid #164e70",
+                borderRadius: 9,
+                color: "#fff",
+                fontSize: 11,
+                outline: "none",
+              }}
+            />
+
+            <button
+              type="button"
+              onClick={startVoice}
+              style={{
+                width: 40,
+                background: listening ? "#dc2626" : "#2563eb",
+                border: "none",
+                borderRadius: 9,
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 15,
+              }}
+            >
+              {listening ? "■" : "🎤"}
+            </button>
+
+            <button
+              type="submit"
+              disabled={thinking || !message.trim()}
+              style={{
+                padding: "0 12px",
+                background:
+                  thinking || !message.trim() ? "#24415b" : "#0d9488",
+                border: "none",
+                borderRadius: 9,
+                color: "#fff",
+                fontWeight: 800,
+                fontSize: 11,
+                cursor:
+                  thinking || !message.trim() ? "not-allowed" : "pointer",
+              }}
+            >
+              Send
+            </button>
+          </form>
+
+          {/* QUICK ACTIONS */}
+          <div
+            style={{
+              padding: "0 12px 12px",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 4,
+            }}
+          >
+            {QUICK_ACTIONS.map((action) => (
+              <button
+                key={action.id}
+                type="button"
+                onClick={() => sendMessage(action.command)}
+                style={{
+                  padding: "5px 8px",
+                  background: "#08243b",
+                  border: "1px solid #164e70",
+                  borderRadius: 14,
+                  color: "#9db4c8",
+                  fontSize: 9,
+                  cursor: "pointer",
+                }}
+              >
+                {action.icon} {action.label}
+              </button>
+            ))}
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
-
-const styles = {
-  hudOverlay: {
-    position: "fixed",
-    bottom: "90px",
-    left: "50%",
-    transform: "translateX(-50%)",
-    background: "rgba(11, 20, 32, 0.95)",
-    backdropFilter: "blur(24px)",
-    border: "1px solid rgba(0, 229, 255, 0.3)",
-    borderRadius: "28px",
-    padding: "14px 26px",
-    color: "#fff",
-    boxShadow: "0 25px 50px rgba(0,0,0,0.85), 0 0 20px rgba(0, 229, 255, 0.2)",
-    display: "flex",
-    alignItems: "center",
-    gap: "18px",
-    maxWidth: "92vw",
-    width: "540px",
-    zIndex: 10000,
-  },
-  hudTitle: {
-    fontSize: "11px",
-    color: "#00E5FF",
-    textTransform: "uppercase",
-    letterSpacing: "1px",
-    fontWeight: "800",
-  },
-  hudSubtitle: {
-    fontSize: "14px",
-    color: "#F3F4F6",
-    fontWeight: "600",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    marginTop: "3px",
-  },
-  micBadge: {
-    fontSize: "10px",
-    background: "rgba(0, 229, 255, 0.2)",
-    color: "#00E5FF",
-    padding: "1px 6px",
-    borderRadius: "4px",
-    fontWeight: "700",
-  },
-  stopBtn: {
-    background: "#EF4444",
-    border: "none",
-    color: "#fff",
-    borderRadius: "12px",
-    padding: "8px 14px",
-    fontSize: "12px",
-    fontWeight: "700",
-    cursor: "pointer",
-  },
-  capsuleBtn: {
-    background: "rgba(13, 45, 74, 0.95)",
-    backdropFilter: "blur(14px)",
-    border: "2px solid",
-    borderRadius: "999px",
-    padding: "6px 18px 6px 8px",
-    display: "flex",
-    alignItems: "center",
-    gap: "12px",
-    color: "#fff",
-    cursor: "pointer",
-    boxShadow: "0 12px 35px rgba(0,0,0,0.6)",
-  },
-  gearBtn: {
-    width: "44px",
-    height: "44px",
-    borderRadius: "50%",
-    background: "#071829",
-    border: "1px solid #1E3A5F",
-    color: "#9CA3AF",
-    fontSize: "16px",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  drawer: {
-    position: "absolute",
-    bottom: "65px",
-    left: "0",
-    width: "330px",
-    background: "#0D2D4A",
-    border: "1px solid #1E3A5F",
-    borderRadius: "18px",
-    padding: "18px",
-    boxShadow: "0 20px 40px rgba(0,0,0,0.8)",
-    display: "flex",
-    flexDirection: "column",
-    gap: "14px",
-    color: "#fff",
-  },
-  closeBtn: {
-    background: "none",
-    border: "none",
-    color: "#9CA3AF",
-    cursor: "pointer",
-    fontSize: "16px",
-  },
-  label: {
-    fontSize: "11px",
-    color: "#9CA3AF",
-    marginBottom: "6px",
-  },
-  modeBtn: {
-    flex: 1,
-    padding: "7px 4px",
-    borderRadius: "8px",
-    border: "none",
-    color: "#fff",
-    fontWeight: "700",
-    fontSize: "10px",
-    cursor: "pointer",
-  },
-  langBtn: {
-    flex: 1,
-    padding: "8px",
-    borderRadius: "8px",
-    border: "none",
-    color: "#fff",
-    fontWeight: "700",
-    fontSize: "11px",
-    cursor: "pointer",
-  },
-  speedBtn: {
-    flex: 1,
-    padding: "6px",
-    borderRadius: "6px",
-    border: "1px solid",
-    color: "#fff",
-    fontSize: "11px",
-    fontWeight: "700",
-    cursor: "pointer",
-  },
-  wakeToggle: {
-    width: "100%",
-    padding: "10px",
-    borderRadius: "10px",
-    border: "1px solid",
-    fontWeight: "700",
-    fontSize: "12px",
-    cursor: "pointer",
-  },
-};
